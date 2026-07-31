@@ -23,6 +23,14 @@ class AsyncRouter extends Router
     public function bootCompleted(): void
     {
         $this->async = true;
+
+        /* Type-hinted Route injection must follow the coroutine. */
+        if ($this->container instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+            $this->container->scopedSingleton(
+                \Illuminate\Routing\Route::class,
+                fn () => current_context()->find(self::CTX_CURRENT_ROUTE),
+            );
+        }
     }
 
     public function dispatch(Request $request)
@@ -44,6 +52,11 @@ class AsyncRouter extends Router
         $route = $this->routes->match($request);
 
         if ($this->async) {
+            /* match() binds the request's parameters onto the Route object, and
+             * RouteCollection keeps one per definition: give this coroutine its
+             * own copy before anything can yield. */
+            $route = clone $route;
+
             current_context()->set(self::CTX_CURRENT_ROUTE, $route);
         } else {
             $this->current = $route;
@@ -51,7 +64,11 @@ class AsyncRouter extends Router
 
         $route->setContainer($this->container);
 
-        $this->container->instance(\Illuminate\Routing\Route::class, $route);
+        /* In async mode Route::class comes from the context instead: a container
+         * instance would be the shared state we just cloned away. */
+        if (! $this->async) {
+            $this->container->instance(\Illuminate\Routing\Route::class, $route);
+        }
 
         return $route;
     }
