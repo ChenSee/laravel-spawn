@@ -196,32 +196,34 @@ class TrueAsyncServer implements ServerInterface
 
             $poolConfig = $app->make('config')->get('async.db_pool', []);
 
-            if (empty($poolConfig['enabled'])) {
-                return;
+            if (! empty($poolConfig['enabled'])) {
+                $connections = $app->make('config')->get('database.connections', []);
+
+                foreach (array_keys($connections) as $name) {
+                    $app->make('config')->set(
+                        "database.connections.{$name}.options",
+                        array_replace(
+                            $app->make('config')->get("database.connections.{$name}.options", []),
+                            [
+                                \PDO::ATTR_POOL_ENABLED              => true,
+                                \PDO::ATTR_POOL_MIN                  => $poolConfig['min'] ?? 2,
+                                \PDO::ATTR_POOL_MAX                  => $poolConfig['max'] ?? 10,
+                                \PDO::ATTR_POOL_HEALTHCHECK_INTERVAL => $poolConfig['healthcheck_interval'] ?? 30,
+                            ]
+                        )
+                    );
+                }
+
+                // If any connections were already created during bootstrap (before pool
+                // options were set), purge them so they get re-created with pool enabled.
+                if ($app->bound('db')) {
+                    $app->make('db')->purge();
+                }
             }
 
-            $connections = $app->make('config')->get('database.connections', []);
-
-            foreach (array_keys($connections) as $name) {
-                $app->make('config')->set(
-                    "database.connections.{$name}.options",
-                    array_replace(
-                        $app->make('config')->get("database.connections.{$name}.options", []),
-                        [
-                            \PDO::ATTR_POOL_ENABLED              => true,
-                            \PDO::ATTR_POOL_MIN                  => $poolConfig['min'] ?? 2,
-                            \PDO::ATTR_POOL_MAX                  => $poolConfig['max'] ?? 10,
-                            \PDO::ATTR_POOL_HEALTHCHECK_INTERVAL => $poolConfig['healthcheck_interval'] ?? 30,
-                        ]
-                    )
-                );
-            }
-
-            // If any connections were already created during bootstrap (before pool
-            // options were set), purge them so they get re-created with pool enabled.
-            if ($app->bound('db')) {
-                $app->make('db')->purge();
-            }
+            // Redis needs the same treatment: one shared connection would let
+            // concurrent coroutines interleave commands on a single socket.
+            \Spawn\Laravel\Redis\RedisPool::configure($app);
 
             if (($view = $app->make('view')) instanceof \Spawn\Laravel\View\AsyncViewFactory) {
                 $view->bootCompleted();

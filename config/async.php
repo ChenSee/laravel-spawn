@@ -38,6 +38,31 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Redis Connection Pool
+    |--------------------------------------------------------------------------
+    |
+    | RedisManager hands the same connection to every coroutine, so without a
+    | pool concurrent commands interleave on one socket and the protocol breaks.
+    | With the pool each coroutine borrows its own physical connection.
+    |
+    | 'mux' reserves connections for multiplexing: stateless commands (GET/SET)
+    | from many coroutines share one socket and are pipelined, while MULTI,
+    | WATCH, SUBSCRIBE and blocking commands still take a private connection.
+    | 0 disables multiplexing and uses checkout only.
+    |
+    | Requires the TrueAsync build of phpredis. Redis Cluster is not pooled.
+    |
+    */
+
+    'redis_pool' => [
+        'enabled' => true,
+        'min'     => 0,
+        'max'     => 10,
+        'mux'     => 0,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | gRPC Handlers
     |--------------------------------------------------------------------------
     |
