@@ -104,6 +104,66 @@ class ScopedSeederTest extends AsyncTestCase
         $this->assertNotSame($results['a'], $results['b']);
     }
 
+    public function test_a_class_marked_scoped_by_attribute_is_resolved_per_coroutine(): void
+    {
+        $app = $this->container([]);
+        $app->enableAsyncMode();
+
+        /* The container discovers the attribute on first resolve, long after startup. */
+        $results = $this->runParallel([
+            'a' => fn () => $app->make(AttributeScopedWidget::class),
+            'b' => fn () => $app->make(AttributeScopedWidget::class),
+        ]);
+
+        $this->assertNotSame($results['a'], $results['b']);
+    }
+
+    public function test_a_scoped_binding_given_as_a_closure_does_not_break_startup(): void
+    {
+        $app = $this->container([]);
+        $app->scoped(fn (): Widget => new Widget());
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel(['a' => fn () => $app->make('config')]);
+
+        $this->assertNotNull($results['a'], 'a closure in scopedInstances must not take the worker down');
+    }
+
+    public function test_a_service_replaced_with_instance_survives_a_later_extend(): void
+    {
+        $app = $this->container();
+        $app->singleton('widgets', fn () => new Widget());
+        $app->make('widgets');
+        $app->enableAsyncMode();
+
+        $replacement = new Widget('replacement');
+        $app->instance('widgets', $replacement);
+        $app->extend('widgets', fn (Widget $widget) => $widget);
+
+        $results = $this->runParallel(['a' => fn () => $app->make('widgets')]);
+
+        $this->assertSame($replacement, $results['a'], 'instance() names the object to use');
+    }
+
+    public function test_a_resolve_outside_a_request_is_not_inherited_by_later_ones(): void
+    {
+        $app = $this->container();
+        $app->singleton('widgets', fn () => new Widget());
+        $app->enableAsyncMode();
+
+        /* The worker resolving something for itself, outside any request. */
+        $atRoot = $app->make('widgets');
+
+        $results = $this->runParallel([
+            'a' => fn () => $app->make('widgets'),
+            'b' => fn () => $app->make('widgets'),
+        ]);
+
+        $this->assertNotSame($atRoot, $results['a'], 'the root must not hand its object to a request');
+        $this->assertNotSame($results['a'], $results['b']);
+    }
+
     public function test_a_service_declared_scoped_by_class_name_is_scoped(): void
     {
         $app = $this->container([Widget::class]);
@@ -407,6 +467,15 @@ class ScopedSeederTest extends AsyncTestCase
         $this->assertNotSame($results['a'], $results['b'], 'the facade must reach each coroutine own instance');
         $this->assertNotSame($bootId, $results['a']);
     }
+}
+
+/**
+ * A class the container has never been told about, marked per-request the way an
+ * application marks its own.
+ */
+#[\Illuminate\Container\Attributes\Scoped]
+class AttributeScopedWidget
+{
 }
 
 /**

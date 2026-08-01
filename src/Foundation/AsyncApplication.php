@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Facade;
 
 use function Async\current_context;
 use function Async\request_context;
+use function Async\root_context;
 
 class AsyncApplication extends Application
 {
@@ -19,6 +20,8 @@ class AsyncApplication extends Application
      *
      * 'cookie' is excluded: AuthManager passes $app['cookie'] to setCookieJar(QueueingFactory).
      * 'auth.driver' is excluded: guards are passed to typed parameters in some middleware.
+     * 'redirect' is excluded: RoutingServiceProvider passes $app['redirect'] to
+     * ResponseFactory::__construct(Redirector $redirector).
      */
     private const FACADE_PROXIED_MAP = [
         'auth'    => true,
@@ -57,6 +60,12 @@ class AsyncApplication extends Application
      * Guards the config read in isScopedAlias() against asking itself the question.
      */
     private bool $readingScopedConfig = false;
+
+    /**
+     * Aliases the application deliberately replaced with instance() while serving,
+     * as a set. Such an object is the answer for everyone, scoping or not.
+     */
+    private array $replacedInstances = [];
 
     public function isAsyncModeEnabled(): bool
     {
@@ -205,6 +214,24 @@ class AsyncApplication extends Application
      * than null, which UrlGenerator::__construct requires when the exception handler
      * renders an error before the first request is served.
      */
+    /**
+     * Note that an application replaced a service outright.
+     *
+     * A per-request service is answered from the context, which would otherwise ignore
+     * the replacement entirely. 'request' is exempt: the kernel rebinds it on every
+     * request, and that is the scoping working, not somebody overriding it.
+     */
+    public function instance($abstract, $instance)
+    {
+        $alias = $this->getAlias($abstract);
+
+        if ($this->asyncMode && $alias !== 'request') {
+            $this->replacedInstances[$alias] = true;
+        }
+
+        return parent::instance($abstract, $instance);
+    }
+
     public function bound($abstract): bool
     {
         if ($this->getAlias($abstract) === 'request') {
@@ -305,9 +332,7 @@ class AsyncApplication extends Application
 
         // instance() names the exact object to use, which outranks scoping — otherwise
         // a test swapping a service for a mock would be answered with the real one.
-        // The template captured at startup is not such a replacement.
-        if (isset($this->instances[$alias])
-            && ($this->scopedPrototypes[$alias] ?? null) !== $this->instances[$alias]) {
+        if (isset($this->replacedInstances[$alias]) && isset($this->instances[$alias])) {
             return $this->instances[$alias];
         }
 
@@ -329,6 +354,11 @@ class AsyncApplication extends Application
                 // Same call shape as Container::build(), which hands the factory the
                 // parameter overrides as a second argument.
                 $instance = $concrete instanceof \Closure ? $concrete($this, []) : $this->build($concrete);
+            } elseif (class_exists($alias)) {
+                // A class the container was never told about — #[Scoped] is discovered
+                // on first resolve, so it arrives here with no binding behind it.
+                // Falling through would let the container keep it as a singleton.
+                $instance = $this->build($alias);
             } else {
                 // No factory registered (e.g. 'request' is stored in instances[], not bindings[]).
                 // Fall through to parent::resolve which handles instances[] correctly.
@@ -359,7 +389,13 @@ class AsyncApplication extends Application
         // container publishes to $instances before firing them: a callback is free to
         // resolve the same alias again, and it has to reach this object rather than
         // build a second one and collide on the context key.
-        $ctx->set($ctxKey, $instance);
+        //
+        // Except at the root, where find() would reach it from every request that ever
+        // follows — the sharing this whole mechanism exists to prevent. A resolve from
+        // there gets its object and nobody inherits it.
+        if ($ctx !== root_context()) {
+            $ctx->set($ctxKey, $instance);
+        }
 
         // Adapters registered via afterResolving() (e.g. registerSessionAdapter) have to
         // fire here too: parent::resolve() is bypassed for scoped services, and it is the
@@ -490,7 +526,7 @@ class AsyncApplication extends Application
         // Laravel's own request-scoped registration. Upstream clears those instances
         // between requests, which only the queue worker ever does; resolving them per
         // coroutine gives them the lifetime they were registered for.
-        if (in_array($alias, $this->scopedInstances, true)) {
+        if (in_array($alias, $this->scopedInstanceAliases(), true)) {
             return true;
         }
 
@@ -519,7 +555,28 @@ class AsyncApplication extends Application
             array_column(ScopedService::cases(), 'value'),
             array_keys($this->scopedServiceCache),
             array_keys($this->scopedBindings),
-            array_map($this->getAlias(...), $this->scopedInstances),
+            $this->scopedInstanceAliases(),
         )));
+    }
+
+    /**
+     * The aliases behind Laravel's own scoped() registrations.
+     *
+     * scoped() also accepts a closure, whose return types name the services; those are
+     * left out rather than guessed at, and stay shared.
+     *
+     * @return string[]
+     */
+    private function scopedInstanceAliases(): array
+    {
+        $aliases = [];
+
+        foreach ($this->scopedInstances as $scoped) {
+            if (is_string($scoped)) {
+                $aliases[] = $this->getAlias($scoped);
+            }
+        }
+
+        return $aliases;
     }
 }
