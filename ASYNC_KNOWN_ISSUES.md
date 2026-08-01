@@ -119,17 +119,28 @@ is not shorter for having found those two.
 
 ### The moves, in order
 
-**1. Relocate storage instead of reimplementing resolution.** `tryResolveScoped()`
-currently re-implements half of `Container::resolve()`, which is exactly where §3 comes
-from — contextual bindings, `buildStack`, `beforeResolving`, the `resolved()` flag. The
-strong form is the opposite: keep `parent::resolve()`, and move only the *storage*. Seed
-`$this->instances[$alias]` from the context before delegating; move the result back into
-the context afterwards. Every container semantic is then inherited rather than
-re-written, and the custom extender loop, callback firing and race guard all disappear.
+**1. Do not relocate storage into `$this->instances` — rejected, with reasons.** The
+obvious refactor is to stop reproducing `Container::resolve()` and instead seed
+`$this->instances[$alias]` from the context, delegate, and move the result back. Two
+things kill it. The container publishes the instance and *then* fires the resolving
+callbacks, which may suspend — and `$this->instances` is shared by every coroutine, so
+one request can read or erase another's object in that window. And the publication order
+inverts: today the instance reaches the context *before* the callbacks run, which is what
+stops a callback resolving its own service from recursing for ever. Relocation cannot
+express that order at all.
 
-**2. One registry of lifetime, not four.** Today: the `ScopedService` enum, the config
-list, `scopedBindings`, and Laravel's own `scopedInstances`. One public method, one
-source of truth, with the enum as nothing more than the default set.
+If the reproduction is to be reduced, the shape worth trying is different: make
+`isShared()` answer false for per-request aliases so the container never touches the
+shared slot, delegate, and publish the *returned* value under the existing
+first-one-wins rule. That still has to solve publication-before-callbacks, and it needs a
+concurrency harness — two coroutines in one scope, a factory that suspends — before any
+of it is worth writing.
+
+**2. One registry of lifetime, not four — done.** The `ScopedService` enum, the config
+list, `scopedBindings` and Laravel's own `scopedInstances` now answer through a single
+map of alias to context key, kept current rather than snapshotted. Measured on the
+benchmark below: a per-request resolve went from 212 ns to 117 ns, because the check
+cost more than the work it guarded.
 
 **3. Make "a singleton captured a per-request object" impossible to miss.** At worker
 start, walk the resolved singletons and report any holding a reference to a per-request
@@ -152,8 +163,8 @@ and a place for packages to add to it.
 rather than wrong data. The factory stays shared; the render stack moves into the
 context, which is the existing adapter pattern taken to its end.
 
-Order: 1 and 2 first — they remove code rather than add it, and close §3 as a side
-effect. Then 3, which buys the most insight per line. Then 4, 5, 6.
+Order: 3 next — it buys the most insight per line. Then 4, 5, 6. The container contract
+gaps in §3 stay until the shape in 1 is proven on a concurrency harness.
 
 **Not on this list:** the design limitations in §2. They are pinned by tests and
 documented; removing them needs a different design, not a fix.

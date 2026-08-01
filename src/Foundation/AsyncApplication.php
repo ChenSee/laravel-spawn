@@ -57,7 +57,20 @@ class AsyncApplication extends Application
     private array $scopedServiceCache = [];
 
     /**
-     * Guards the config read in isScopedAlias() against asking itself the question.
+     * Every alias resolved per coroutine, mapped to the key it is stored under in the
+     * context: alias => ScopedService|string. Answering from one map is what keeps the
+     * check off the hot path — it is consulted on every resolve the application makes.
+     */
+    private array $perRequestKeys = [];
+
+    /**
+     * How many entries of Laravel's own scoped list have been taken in, so that a list
+     * which grows while the worker runs is noticed without walking it every time.
+     */
+    private int $scopedInstancesSeen = 0;
+
+    /**
+     * Guards the config read in perRequestKey() against asking itself the question.
      */
     private bool $readingScopedConfig = false;
 
@@ -66,6 +79,15 @@ class AsyncApplication extends Application
      * as a set. Such an object is the answer for everyone, scoping or not.
      */
     private array $replacedInstances = [];
+
+    public function __construct($basePath = null)
+    {
+        parent::__construct($basePath);
+
+        foreach (ScopedService::cases() as $case) {
+            $this->perRequestKeys[$case->value] = $case;
+        }
+    }
 
     public function isAsyncModeEnabled(): bool
     {
@@ -127,6 +149,7 @@ class AsyncApplication extends Application
     public function scopedSingleton(string $abstract, Closure $factory): void
     {
         $this->scopedBindings[$this->getAlias($abstract)] = $factory;
+        $this->markPerRequest($abstract);
     }
 
     /**
@@ -202,6 +225,7 @@ class AsyncApplication extends Application
 
         foreach ($abstracts as $abstract) {
             $this->scopedServiceCache[$this->getAlias($abstract)] = true;
+            $this->markPerRequest($abstract);
         }
     }
 
@@ -324,9 +348,9 @@ class AsyncApplication extends Application
      */
     private function tryResolveScoped(string $alias): mixed
     {
-        $key = ScopedService::tryFrom($alias);
+        $key = $this->perRequestKey($alias);
 
-        if ($key === null && ! $this->isScopedAlias($alias)) {
+        if ($key === null) {
             return null;
         }
 
@@ -337,7 +361,7 @@ class AsyncApplication extends Application
         }
 
         $ctx = $this->scopeContext();
-        $ctxKey = $key ?? $alias;
+        $ctxKey = $key;
 
         $instance = $ctx->find($ctxKey);
 
@@ -519,15 +543,28 @@ class AsyncApplication extends Application
      */
     private function isScopedAlias(string $alias): bool
     {
-        if (ScopedService::tryFrom($alias) !== null || isset($this->scopedBindings[$alias])) {
-            return true;
+        return $this->perRequestKey($alias) !== null;
+    }
+
+    /**
+     * The context key this alias is stored under, or null if it is not per-request.
+     *
+     * One hash lookup answers both questions, because this runs on every resolve the
+     * application makes — the check used to cost more than the work it guarded.
+     *
+     * The map is kept current rather than snapshotted: Laravel appends to its own
+     * scoped list while running (a deferred provider calling scoped(), the #[Scoped]
+     * attribute discovered on first resolve), and a service that becomes per-request
+     * after startup must not stay shared.
+     */
+    private function perRequestKey(string $alias): ScopedService|string|null
+    {
+        if (count($this->scopedInstances) !== $this->scopedInstancesSeen) {
+            $this->absorbScopedInstances();
         }
 
-        // Laravel's own request-scoped registration. Upstream clears those instances
-        // between requests, which only the queue worker ever does; resolving them per
-        // coroutine gives them the lifetime they were registered for.
-        if (in_array($alias, $this->scopedInstanceAliases(), true)) {
-            return true;
+        if (isset($this->perRequestKeys[$alias])) {
+            return $this->perRequestKeys[$alias];
         }
 
         // Reading the config resolves a service, which asks this question again. The
@@ -541,9 +578,37 @@ class AsyncApplication extends Application
             } finally {
                 $this->readingScopedConfig = false;
             }
+
+            return $this->perRequestKeys[$alias] ?? null;
         }
 
-        return isset($this->scopedServiceCache[$alias]);
+        return null;
+    }
+
+    /**
+     * Take in whatever Laravel has added to its own scoped list since the last look.
+     */
+    private function absorbScopedInstances(): void
+    {
+        $this->scopedInstancesSeen = count($this->scopedInstances);
+
+        foreach ($this->scopedInstances as $scoped) {
+            // scoped() also accepts a closure, whose return types name the services;
+            // those are left out rather than guessed at, and stay shared.
+            if (is_string($scoped)) {
+                $this->markPerRequest($scoped);
+            }
+        }
+    }
+
+    /**
+     * Declare an alias per-request, under the context key it will be stored with.
+     */
+    private function markPerRequest(string $abstract): void
+    {
+        $alias = $this->getAlias($abstract);
+
+        $this->perRequestKeys[$alias] ??= ScopedService::tryFrom($alias) ?? $alias;
     }
 
     /**
@@ -551,32 +616,8 @@ class AsyncApplication extends Application
      */
     private function scopedAliases(): array
     {
-        return array_values(array_unique(array_merge(
-            array_column(ScopedService::cases(), 'value'),
-            array_keys($this->scopedServiceCache),
-            array_keys($this->scopedBindings),
-            $this->scopedInstanceAliases(),
-        )));
-    }
+        $this->absorbScopedInstances();
 
-    /**
-     * The aliases behind Laravel's own scoped() registrations.
-     *
-     * scoped() also accepts a closure, whose return types name the services; those are
-     * left out rather than guessed at, and stay shared.
-     *
-     * @return string[]
-     */
-    private function scopedInstanceAliases(): array
-    {
-        $aliases = [];
-
-        foreach ($this->scopedInstances as $scoped) {
-            if (is_string($scoped)) {
-                $aliases[] = $this->getAlias($scoped);
-            }
-        }
-
-        return $aliases;
+        return array_keys($this->perRequestKeys);
     }
 }
