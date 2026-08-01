@@ -208,6 +208,24 @@ class AsyncServiceProvider extends ServiceProvider
                 return new \Spawn\Laravel\Session\AsyncDatabaseSessionHandler($conn, $table, $lifetime, $app);
             });
         });
+
+        if (! $this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+            return;
+        }
+
+        // A custom session handler is registered on the manager during boot
+        // (Session::extend('mongo', ...)), so a coroutine building its own manager
+        // would report the driver as unsupported.
+        $this->app->scopedSeeder('session', function (object $coroutineManager, object $bootManager): void {
+            if (! $coroutineManager instanceof \Illuminate\Support\Manager
+                || ! $bootManager instanceof \Illuminate\Support\Manager) {
+                return;
+            }
+
+            foreach ((fn () => $this->customCreators)->call($bootManager) as $driver => $creator) {
+                $coroutineManager->extend($driver, $creator);
+            }
+        });
     }
 
     private function registerTelescopeAdapter(): void

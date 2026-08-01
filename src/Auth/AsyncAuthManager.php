@@ -76,14 +76,13 @@ class AsyncAuthManager extends AuthManager
      *
      * Neither manager has to be an AsyncAuthManager — an application is free to bind
      * its own, and losing its registrations is exactly the failure being prevented.
-     * What such a prototype cannot offer is the callback behind a viaRequest driver,
-     * so its wrapper is adopted as it stands, still resolving against the manager that
-     * created it.
+     * What such a prototype cannot offer is the callback behind a viaRequest driver:
+     * its wrapper is adopted whole, and while extend() re-binds $this to the target,
+     * the wrapper still asks the container to keep the guard in step with 'request'.
      *
-     * The same holds for anything a registration closed over with `use`: rebinding
-     * fixes $this and nothing else. A package that captured a manager or a guard in
-     * its creator resolves against that captured object, in this coroutine and every
-     * other one.
+     * Re-binding reaches $this and nothing else. A registration that captured a
+     * manager or a guard with `use` goes on resolving against what it captured, in
+     * this coroutine and in every other one.
      */
     public static function seedInto(AuthManager $target, AuthManager $prototype): void
     {

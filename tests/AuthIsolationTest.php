@@ -4,13 +4,9 @@ namespace Spawn\Laravel\Tests;
 
 use Illuminate\Auth\AuthManager;
 use Illuminate\Auth\RequestGuard;
-use Illuminate\Config\Repository;
-use Illuminate\Events\EventServiceProvider;
-use Illuminate\Filesystem\Filesystem;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Facade;
-use Spawn\Laravel\AsyncServiceProvider;
 use Spawn\Laravel\Auth\AsyncAuthManager;
 use Spawn\Laravel\Foundation\AsyncApplication;
 use Spawn\Laravel\Foundation\ScopedService;
@@ -21,47 +17,14 @@ use function Async\current_context;
 
 class AuthIsolationTest extends AsyncTestCase
 {
+    use BootsAsyncApplication;
+
     protected function tearDown(): void
     {
         Facade::clearResolvedInstances();
         Facade::setFacadeApplication(null);
 
         parent::tearDown();
-    }
-
-    /**
-     * An application that has booted its providers and has not started serving yet —
-     * the state every worker is in when async mode is switched on.
-     *
-     * @param  string[]  $providers  application providers, booted after the package's own
-     */
-    private function bootedApp(array $providers = [BotTokenAuthServiceProvider::class]): AsyncApplication
-    {
-        $app = new AsyncApplication(sys_get_temp_dir());
-
-        $app->instance('files', new Filesystem());
-        $app->instance('config', new Repository([
-            'async' => ['scoped_services' => [], 'db_pool' => ['enabled' => false]],
-            'auth'  => [
-                'defaults' => ['guard' => 'bot'],
-                'guards'   => ['bot' => ['driver' => BotTokenAuthServiceProvider::DRIVER]],
-            ],
-        ]));
-
-        Facade::setFacadeApplication($app);
-        Facade::clearResolvedInstances();
-
-        $app->register(EventServiceProvider::class);
-        $app->register(\Illuminate\Auth\AuthServiceProvider::class);
-        $app->register(AsyncServiceProvider::class);
-
-        foreach ($providers as $provider) {
-            $app->register($provider);
-        }
-
-        $app->boot();
-
-        return $app;
     }
 
     /**
@@ -347,6 +310,48 @@ class AuthIsolationTest extends AsyncTestCase
         );
     }
 
+    public function test_objects_shared_across_requests_still_follow_the_request(): void
+    {
+        $app = $this->bootedApp();
+        $app->enableAsyncMode();
+
+        // How the framework keeps the URL generator on the current request.
+        $shared = new \stdClass();
+        $shared->request = null;
+        $app->rebinding('request', function ($container, $request) use ($shared) {
+            $shared->request = $request;
+        });
+
+        $this->runParallel([
+            'a' => fn () => $this->withRequest('a', fn (Request $request) => $app->instance('request', $request)),
+        ]);
+
+        $this->assertSame(
+            'a',
+            $shared->request?->headers->get(BotTokenAuthServiceProvider::TOKEN_HEADER),
+            'rebinding() is how shared singletons track the request and must keep working',
+        );
+    }
+
+    public function test_session_store_is_not_shared_between_coroutines(): void
+    {
+        $app = $this->bootedApp();
+        $app->singleton('session', fn () => new SessionManagerStub());
+        $app->singleton('session.store', fn ($container) => $container->make('session')->driver());
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel([
+            'a' => fn () => $this->withRequest('a', fn () => spl_object_id($app->make('session.store'))),
+            'b' => fn () => $this->withRequest('b', fn () => spl_object_id($app->make('session.store'))),
+        ]);
+
+        $this->assertNotSame(
+            $results['a'],
+            $results['b'],
+            'the stock session guard reads the authenticated user out of this store',
+        );
+    }
+
     public function test_auth_driver_alias_resolves_the_guard_of_its_coroutine(): void
     {
         $app = $this->bootedApp();
@@ -363,6 +368,24 @@ class AuthIsolationTest extends AsyncTestCase
         ]);
 
         $this->assertSame(['a' => 'a', 'b' => 'b'], $results);
+    }
+}
+
+/**
+ * Session manager stripped to what the container cares about: it hands out a driver,
+ * and each manager hands out its own.
+ */
+class SessionManagerStub
+{
+    private ?\stdClass $driver = null;
+
+    public function driver(): \stdClass
+    {
+        return $this->driver ??= new \stdClass();
+    }
+
+    public function extend(string $driver, \Closure $callback): void
+    {
     }
 }
 

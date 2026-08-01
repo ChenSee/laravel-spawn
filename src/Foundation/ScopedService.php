@@ -20,6 +20,14 @@ enum ScopedService: string
 {
     case REQUEST     = 'request';
     case SESSION     = 'session';
+
+    /**
+     * The store behind the session manager is bound on its own, and the stock session
+     * guard reads the authenticated user out of it. Left shared, it answers one
+     * request with another request's session.
+     */
+    case SESSION_STORE = 'session.store';
+
     case AUTH        = 'auth';
     case AUTH_DRIVER = 'auth.driver';
     case COOKIE      = 'cookie';

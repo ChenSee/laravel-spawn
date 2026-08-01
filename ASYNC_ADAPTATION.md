@@ -20,7 +20,7 @@ In async mode, multiple HTTP requests execute concurrently inside a single PHP w
 |---|---|---|
 | **Request** | `ScopedService::REQUEST` | Full request object per coroutine |
 | **Auth** | `ScopedService::AUTH` + `ScopedServiceProxy` + [`AsyncAuthManager`](src/Auth/AsyncAuthManager.php) | Guards, authenticated user (driver registrations stay shared) |
-| **Session** | `ScopedService::SESSION` + `ScopedServiceProxy` | Session data |
+| **Session** | `ScopedService::SESSION` + `ScopedService::SESSION_STORE` + `ScopedServiceProxy` | Session data, including the store the session guard authenticates from |
 | **Cookie** | `ScopedService::COOKIE` | Queued cookies |
 | **View / Blade** | [`AsyncViewFactory`](src/View/AsyncViewFactory.php) | `View::share()` data |
 | **Routing** | [`AsyncRouter`](src/Routing/AsyncRouter.php) | Current route and request |

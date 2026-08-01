@@ -3,6 +3,7 @@
 namespace Spawn\Laravel\Foundation;
 
 use Closure;
+use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Facade;
 
@@ -91,6 +92,7 @@ class AsyncApplication extends Application
         }
 
         $this->captureScopedPrototypes();
+        $this->reportPrematureAsyncMode();
 
         // A facade resolved during bootstrap keeps the boot-time instance in a static
         // array of its own and would go on handing it to every coroutine, never once
@@ -129,15 +131,13 @@ class AsyncApplication extends Application
     }
 
     /**
-     * In async mode 'request' is always resolvable (from context, instances, or fallback).
-     * Returning true here makes rebinding('request', ...) call make('request') instead of
-     * returning null — which prevents a TypeError in UrlGenerator::__construct when the
-     * exception handler renders an error before the first HTTP request is processed.
-     */
-    /**
      * 'request' is always resolvable: from context, instances, or fallback.
-     * This prevents crashes when code checks bound('request') during bootstrap
-     * (before any HTTP request arrives) — e.g. AuthServiceProvider::registerRequestRebindHandler().
+     *
+     * This keeps code that checks bound('request') during bootstrap from crashing,
+     * before any HTTP request exists — AuthServiceProvider::registerRequestRebindHandler()
+     * among it. It also makes rebinding('request', ...) return make('request') rather
+     * than null, which UrlGenerator::__construct requires when the exception handler
+     * renders an error before the first request is served.
      */
     public function bound($abstract): bool
     {
@@ -253,6 +253,15 @@ class AsyncApplication extends Application
 
         $this->seedScopedInstance($alias, $instance);
 
+        // A sibling coroutine of the same scope may have got here first while this one
+        // was suspended inside the factory. Its instance is already the one the context
+        // hands out, so this one is dropped rather than fought over.
+        $winner = $ctx->find($ctxKey);
+
+        if ($winner !== null) {
+            return $winner;
+        }
+
         // The instance goes into the context before the callbacks run, the way the
         // container publishes to $instances before firing them: a callback is free to
         // resolve the same alias again, and it has to reach this object rather than
@@ -268,23 +277,25 @@ class AsyncApplication extends Application
     }
 
     /**
-     * Registrations of interest in a request that has already ended are worse than
-     * useless, so in async mode nothing subscribes to 'request' being rebound.
+     * In async mode an object is never kept in step with the current request.
      *
-     * The container is shared by every coroutine, and each request rebinds 'request'
-     * once (Kernel::sendRequestThroughRouter). A subscriber registered while serving
-     * therefore lives forever, is called on every later request, and keeps whatever it
-     * holds — a guard, its user — alive with it. Upstream registers exactly such a
-     * subscriber for every guard it builds. Nothing is lost by dropping it: within one
-     * coroutine the request object does not change.
+     * refresh() exists for an object that outlives the request it was built for; a
+     * coroutine has none. What it leaves behind is real damage: the subscription goes
+     * into the shared container, so it survives its coroutine, is invoked on every
+     * later request, and holds its target — a guard, and the user inside it — alive
+     * forever. Upstream registers one for every guard it builds.
+     *
+     * Only refresh() is refused. rebinding() still works, because the framework uses
+     * it for objects that genuinely are shared and do have to follow the request,
+     * the URL generator among them.
      */
-    public function rebinding($abstract, Closure $callback)
+    public function refresh($abstract, $target, $method)
     {
-        if ($this->asyncMode && $this->getAlias($abstract) === 'request') {
-            return $this->resolveRequest();
+        if ($this->asyncMode) {
+            return $this->make($abstract);
         }
 
-        return parent::rebinding($abstract, $callback);
+        return parent::refresh($abstract, $target, $method);
     }
 
     /**
@@ -320,21 +331,35 @@ class AsyncApplication extends Application
     }
 
     /**
+     * Report async mode being switched on with providers registered but not booted.
+     *
+     * Unconditional, unlike the diagnostics below: every boot-time registration made
+     * from that point on is lost, the loss is silent, and by the time anything shows
+     * it looks like the registration was never written. The HTTP kernel stands in for
+     * "this is a real application": a bare container assembled by a test has no
+     * providers of its own to lose.
+     */
+    private function reportPrematureAsyncMode(): void
+    {
+        if ($this->isBooted() || ! $this->bound(HttpKernel::class)) {
+            return;
+        }
+
+        error_log(
+            '[async] async mode was enabled before the application booted: providers configure '
+            .'objects no coroutine inherits, so their boot-time registrations are lost'
+        );
+    }
+
+    /**
      * Warn about configuration that bootstrap made and no coroutine will inherit.
      *
-     * Both failures reported here are invisible at runtime: the service resolves,
-     * behaves like a freshly constructed one, and fails much later wherever the lost
-     * registration was supposed to be used.
+     * The failure is invisible at runtime: the service resolves, behaves like a freshly
+     * constructed one, and fails much later wherever the lost registration was supposed
+     * to be used.
      */
     private function reportScopedServiceRisks(): void
     {
-        if (! $this->isBooted()) {
-            error_log(
-                '[async] async mode was enabled before the application booted: providers will '
-                .'configure objects no coroutine inherits, so boot-time registrations are lost'
-            );
-        }
-
         foreach (array_keys($this->scopedPrototypes) as $alias) {
             if (isset($this->scopedSeeders[$alias]) || isset($this->scopedBindings[$alias])) {
                 continue;
