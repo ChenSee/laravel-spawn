@@ -17,6 +17,7 @@ class AsyncServiceProvider extends ServiceProvider
         $this->registerRouterAdapter();
         $this->registerTranslatorAdapter();
         $this->registerSessionAdapter();
+        $this->registerAuthAdapter();
         $this->registerDatabaseAdapter();
         $this->registerPermissionAdapter();
         $this->registerInertiaAdapter();
@@ -54,6 +55,26 @@ class AsyncServiceProvider extends ServiceProvider
             \Fruitcake\LaravelDebugbar\LaravelDebugbar::class,
             fn ($debugbar, $app) => new \Spawn\Laravel\Debugbar\AsyncDebugbar($app, $app['request']),
         );
+    }
+
+    private function registerAuthAdapter(): void
+    {
+        // Bootstrap has to configure our subclass, not the stock manager: an
+        // application registers its guards on the object (Auth::extend(),
+        // Auth::viaRequest()), and only the subclass can tell a coroutine what
+        // those registrations were.
+        $this->app->singleton('auth', fn ($app) => new \Spawn\Laravel\Auth\AsyncAuthManager($app));
+
+        if (! $this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+            return;
+        }
+
+        $this->app->scopedSeeder('auth', function (object $coroutineManager, object $bootManager): void {
+            if ($coroutineManager instanceof \Illuminate\Auth\AuthManager
+                && $bootManager instanceof \Illuminate\Auth\AuthManager) {
+                \Spawn\Laravel\Auth\AsyncAuthManager::seedInto($coroutineManager, $bootManager);
+            }
+        });
     }
 
     private function registerPermissionAdapter(): void

@@ -4,6 +4,7 @@ namespace Spawn\Laravel\Foundation;
 
 use Closure;
 use Illuminate\Foundation\Application;
+use Illuminate\Support\Facades\Facade;
 
 use function Async\current_context;
 
@@ -33,6 +34,18 @@ class AsyncApplication extends Application
     private array $scopedBindings = [];
 
     /**
+     * Registration transfer callbacks: abstract => Closure(object $fresh, object $bootInstance).
+     */
+    private array $scopedSeeders = [];
+
+    /**
+     * What the container held for each scoped alias when async mode started:
+     * abstract => object. A missing entry means the service was never resolved
+     * during bootstrap, so it carries no configuration worth transferring.
+     */
+    private array $scopedPrototypes = [];
+
+    /**
      * Cached config('async.scoped_services') as alias => true hash map.
      * Populated once in enableAsyncMode() to avoid per-resolve config lookups.
      */
@@ -59,19 +72,60 @@ class AsyncApplication extends Application
         return parent::runningInConsole();
     }
 
+    /**
+     * Switch the container over to per-coroutine resolution of scoped services.
+     *
+     * Call once per worker, after the framework has finished bootstrapping: what
+     * the providers configured during boot is captured here, and everything that
+     * cached a boot-time instance is invalidated. Calling it earlier means the
+     * providers configure objects nobody will ever see again.
+     */
     public function enableAsyncMode(): void
     {
         $this->asyncMode = true;
 
-        if ($this->resolved('config')) {
-            $scoped = $this->make('config')->get('async.scoped_services', []);
-            $this->scopedServiceCache = array_flip($scoped);
+        $config = $this->resolved('config') ? $this->make('config') : null;
+
+        if ($config !== null) {
+            $this->scopedServiceCache = array_flip($config->get('async.scoped_services', []));
+        }
+
+        $this->captureScopedPrototypes();
+
+        // A facade resolved during bootstrap keeps the boot-time instance in a static
+        // array of its own and would go on handing it to every coroutine, never once
+        // asking offsetGet() for the scoped proxy. Only the proxied aliases are dropped:
+        // for the rest, offsetGet() still answers with a single per-coroutine object,
+        // and re-resolving would pin whichever coroutine asked first.
+        foreach (array_keys(self::FACADE_PROXIED_MAP) as $proxied) {
+            Facade::clearResolvedInstance($proxied);
+        }
+
+        if ($config !== null && $config->get('async.diagnostics', false)) {
+            $this->reportScopedServiceRisks();
         }
     }
 
     public function scopedSingleton(string $abstract, Closure $factory): void
     {
         $this->scopedBindings[$abstract] = $factory;
+    }
+
+    /**
+     * Teach the container how to carry boot-time configuration onto per-coroutine
+     * instances of a scoped service.
+     *
+     * The seeder receives the freshly built instance and the boot-time one, and is
+     * expected to copy across registrations only — never per-request state, which is
+     * the very thing scoping exists to keep apart.
+     *
+     * Without a seeder, a scoped service is whatever its factory returns: anything a
+     * provider did to the object after construction (extend(), viaRequest(), setters)
+     * stays behind on the boot-time instance.
+     */
+    public function scopedSeeder(string $abstract, Closure $seeder): void
+    {
+        $this->scopedSeeders[$abstract] = $seeder;
     }
 
     /**
@@ -189,24 +243,119 @@ class AsyncApplication extends Application
             }
         }
 
-        // Fire only the alias-specific afterResolving callbacks so adapters registered via
-        // afterResolving('session', ...) work for scoped services.
-        //
-        // We intentionally do NOT call fireResolvingCallbacks() here because that also
-        // fires globalAfterResolvingCallbacks — third-party callbacks that may access
-        // services not yet available (e.g. 'request') and crash the worker on boot.
-        $aliasKey = $this->getAlias($alias);
-        foreach ($this->afterResolvingCallbacks[$aliasKey] ?? [] as $cb) {
-            $cb($instance, $this);
+        // extend() registrations live outside the factory, so building from the
+        // concrete alone would silently drop them for scoped services only. They run
+        // before seeding, because a decorating extender replaces the object and the
+        // registrations have to land on whatever the coroutine will actually use.
+        foreach ($this->getExtenders($alias) as $extender) {
+            $instance = $extender($instance, $this);
         }
 
-        // Fire resolving/afterResolving callbacks so that adapters registered via
-        // afterResolving() (e.g. registerSessionAdapter) work for scoped services too.
-        // Without this, parent::resolve() is bypassed and callbacks never fire.
-        $this->fireResolvingCallbacks($alias, $instance);
+        $this->seedScopedInstance($alias, $instance);
 
+        // The instance goes into the context before the callbacks run, the way the
+        // container publishes to $instances before firing them: a callback is free to
+        // resolve the same alias again, and it has to reach this object rather than
+        // build a second one and collide on the context key.
         $ctx->set($ctxKey, $instance);
 
+        // Adapters registered via afterResolving() (e.g. registerSessionAdapter) have to
+        // fire here too: parent::resolve() is bypassed for scoped services, and it is the
+        // only other place that fires them.
+        $this->fireResolvingCallbacks($alias, $instance);
+
         return $instance;
+    }
+
+    /**
+     * Registrations of interest in a request that has already ended are worse than
+     * useless, so in async mode nothing subscribes to 'request' being rebound.
+     *
+     * The container is shared by every coroutine, and each request rebinds 'request'
+     * once (Kernel::sendRequestThroughRouter). A subscriber registered while serving
+     * therefore lives forever, is called on every later request, and keeps whatever it
+     * holds — a guard, its user — alive with it. Upstream registers exactly such a
+     * subscriber for every guard it builds. Nothing is lost by dropping it: within one
+     * coroutine the request object does not change.
+     */
+    public function rebinding($abstract, Closure $callback)
+    {
+        if ($this->asyncMode && $this->getAlias($abstract) === 'request') {
+            return $this->resolveRequest();
+        }
+
+        return parent::rebinding($abstract, $callback);
+    }
+
+    /**
+     * Hand the boot-time configuration of a scoped service to the instance this
+     * coroutine has just built, if the service registered a way to transfer it.
+     */
+    private function seedScopedInstance(string $alias, object $instance): void
+    {
+        $seeder    = $this->scopedSeeders[$alias] ?? null;
+        $prototype = $this->scopedPrototypes[$alias] ?? null;
+
+        if ($seeder === null || $prototype === null) {
+            return;
+        }
+
+        $seeder($instance, $prototype);
+    }
+
+    /**
+     * Remember what bootstrap left in the container for every scoped alias.
+     *
+     * Only instances that are already resolved are taken. Resolving one here would
+     * happen with async mode switched on, which stores it in the root context — where
+     * find() reaches it from every coroutine and the sharing we are undoing comes back.
+     */
+    private function captureScopedPrototypes(): void
+    {
+        foreach ($this->scopedAliases() as $alias) {
+            if (isset($this->instances[$alias])) {
+                $this->scopedPrototypes[$alias] = $this->instances[$alias];
+            }
+        }
+    }
+
+    /**
+     * Warn about configuration that bootstrap made and no coroutine will inherit.
+     *
+     * Both failures reported here are invisible at runtime: the service resolves,
+     * behaves like a freshly constructed one, and fails much later wherever the lost
+     * registration was supposed to be used.
+     */
+    private function reportScopedServiceRisks(): void
+    {
+        if (! $this->isBooted()) {
+            error_log(
+                '[async] async mode was enabled before the application booted: providers will '
+                .'configure objects no coroutine inherits, so boot-time registrations are lost'
+            );
+        }
+
+        foreach (array_keys($this->scopedPrototypes) as $alias) {
+            if (isset($this->scopedSeeders[$alias]) || isset($this->scopedBindings[$alias])) {
+                continue;
+            }
+
+            error_log(
+                "[async] scoped service '{$alias}' was configured during bootstrap but has no "
+                .'scopedSeeder()/scopedSingleton(); coroutines will get an unconfigured instance'
+            );
+        }
+    }
+
+    /**
+     * @return string[] every alias this container treats as scoped
+     */
+    private function scopedAliases(): array
+    {
+        return array_values(array_unique(array_merge(
+            array_column(ScopedService::cases(), 'value'),
+            array_keys($this->scopedServiceCache),
+            array_keys($this->scopedBindings),
+        )));
     }
 }

@@ -19,7 +19,7 @@ In async mode, multiple HTTP requests execute concurrently inside a single PHP w
 | Component | Adapter | What's Isolated |
 |---|---|---|
 | **Request** | `ScopedService::REQUEST` | Full request object per coroutine |
-| **Auth** | `ScopedService::AUTH` + `ScopedServiceProxy` | Guards, authenticated user |
+| **Auth** | `ScopedService::AUTH` + `ScopedServiceProxy` + [`AsyncAuthManager`](src/Auth/AsyncAuthManager.php) | Guards, authenticated user (driver registrations stay shared) |
 | **Session** | `ScopedService::SESSION` + `ScopedServiceProxy` | Session data |
 | **Cookie** | `ScopedService::COOKIE` | Queued cookies |
 | **View / Blade** | [`AsyncViewFactory`](src/View/AsyncViewFactory.php) | `View::share()` data |
@@ -188,6 +188,55 @@ $app->scopedSingleton(\SomePackage\Manager::class, function ($app) {
     return new Manager($app['config']['some-package']);
 });
 ```
+
+### Using scopedSeeder
+
+A scoped service is rebuilt from its factory in every coroutine. Anything a provider
+did to the object *after* it was constructed stays behind on the boot-time instance:
+
+```php
+// AuthServiceProvider::boot() — writes into the object, not into the factory
+Auth::viaRequest('bot-user-token', $callback);
+```
+
+The coroutine gets a manager built by `new AuthManager($app)`, which knows nothing
+about that driver. The symptom is a service behaving as if it had never been
+configured — `Auth driver [bot-user-token] for guard [bot] is not defined`, a missing
+macro, a handler that never fires.
+
+Register how to carry the registrations over:
+
+```php
+$app->scopedSeeder(\SomePackage\Manager::class, function ($fresh, $bootTime) {
+    $fresh->registerDrivers($bootTime->drivers());
+});
+```
+
+The seeder receives the instance this coroutine has just built and the one bootstrap
+left behind. Copy **registrations only**. Per-request state — resolved drivers, the
+current user, the current request — is what scoping exists to keep apart, and copying
+it reintroduces the very leak scoping prevents.
+
+The boot-time instance is captured when async mode starts, after every provider has
+booted, and never again. What follows from that:
+
+- configuration done lazily, on first use inside a request, needs no seeder;
+- a service the application never resolved during bootstrap has nothing to transfer —
+  including one registered through `scopedSingleton()`, which has no boot-time instance
+  by definition;
+- a registration made *after* serving has begun reaches that coroutine and no other.
+  A deferred provider loaded inside a request is the usual way to hit this: it is
+  marked as loaded, never registers again, and every later coroutine is without it.
+  Register such a driver eagerly, or from a provider that is not deferred.
+
+A seeder only runs for an alias the container treats as scoped — one of
+`ScopedService`, `scoped_services`, or `scopedSingleton()`. On any other alias it is
+never called.
+
+Set `'diagnostics' => true` in `config/async.php` to have the worker report at startup
+which scoped services bootstrap configured and no seeder covers.
+
+`auth` is handled by the package itself ([`AsyncAuthManager`](src/Auth/AsyncAuthManager.php)).
 
 ### Writing a custom adapter
 
