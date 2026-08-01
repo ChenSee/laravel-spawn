@@ -215,6 +215,180 @@ class ScopedSeederTest extends AsyncTestCase
         $this->assertSame(0, $seederCalls, 'a service never resolved at boot carries no configuration');
     }
 
+    /**
+     * A decorator is what the coroutine gets, and it is what the seeder configures.
+     *
+     * An extender is free to return a different object — Laravel's own docs show
+     * exactly that. The registrations bootstrap made have to land on the object the
+     * coroutine will actually use, which is the replacement and not the object the
+     * factory built and the extender threw away.
+     */
+    public function test_a_replacing_extender_is_the_object_the_seeder_configures(): void
+    {
+        $app = $this->container();
+        $app->singleton('widgets', fn () => new Widget('from-factory'));
+        $app->extend('widgets', fn (Widget $widget) => new DecoratedWidget($widget));
+        $app->scopedSeeder('widgets', fn (Widget $fresh, Widget $bootTime) => $fresh->register($bootTime->registered()));
+
+        $app->make('widgets')->register(['at-boot']);
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel([
+            'a' => fn () => $app->make('widgets'),
+            'b' => fn () => $app->make('widgets'),
+        ]);
+
+        $this->assertInstanceOf(DecoratedWidget::class, $results['a'], 'the replacement is the service');
+        $this->assertSame('from-factory', $results['a']->inner->mark, 'the factory still builds what it wraps');
+        $this->assertSame(
+            ['at-boot'],
+            $results['a']->registered(),
+            'the seeder must configure the replacement, not the object it replaced',
+        );
+        $this->assertSame([], $results['a']->inner->registered(), 'the discarded object is nobody service');
+        $this->assertNotSame($results['a'], $results['b'], 'a replacement is built per coroutine like any other');
+    }
+
+    /**
+     * An extender registered while serving replaces the template too.
+     *
+     * A seeder recognises what it is handed by type — ManagerRegistrations does exactly
+     * that. Leave the template undecorated and it is handed an object of the old shape,
+     * while every coroutine holds one of the new.
+     */
+    public function test_an_extender_registered_while_serving_replaces_the_seeding_template(): void
+    {
+        $app = $this->container();
+        $app->singleton('widgets', fn () => new Widget('from-factory'));
+
+        $seededFrom = [];
+        $app->scopedSeeder('widgets', function (Widget $fresh, Widget $bootTime) use (&$seededFrom) {
+            $seededFrom[] = $bootTime::class;
+        });
+
+        $app->make('widgets');
+        $app->enableAsyncMode();
+
+        /* A deferred provider loaded inside the first request replaces the service. */
+        $this->runParallel(['first' => function () use ($app) {
+            $app->extend('widgets', fn (Widget $widget) => new DecoratedWidget($widget));
+        }]);
+
+        $results = $this->runParallel(['later' => fn () => $app->make('widgets')]);
+
+        $this->assertInstanceOf(DecoratedWidget::class, $results['later']);
+        $this->assertSame(
+            [DecoratedWidget::class],
+            $seededFrom,
+            'the template a coroutine is seeded from carries the same decoration it does',
+        );
+    }
+
+    /**
+     * config/async.php is written in class names; the seeder may be too.
+     *
+     * Registered under a name the container never resolves by, the seeder is simply
+     * never found, and the service is served unconfigured with nothing to show for it.
+     */
+    public function test_a_seeder_registered_under_a_class_name_still_runs(): void
+    {
+        $app = $this->container([Widget::class]);
+        $app->singleton('widgets', fn () => new Widget());
+        $app->alias('widgets', Widget::class);
+        $app->scopedSeeder(Widget::class, fn (Widget $fresh, Widget $bootTime) => $fresh->register($bootTime->registered()));
+
+        $app->make('widgets')->register(['at-boot']);
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel(['a' => fn () => $app->make(Widget::class)]);
+
+        $this->assertSame(['at-boot'], $results['a']->registered());
+    }
+
+    /**
+     * The same, for the scoped list itself, with a service that is genuinely shared.
+     *
+     * The existing class-name test binds its service with bind(), which hands out a new
+     * object on every resolve whether the container scopes it or not; only a singleton
+     * can tell the two apart.
+     */
+    public function test_a_singleton_declared_scoped_by_class_name_is_resolved_per_coroutine(): void
+    {
+        $app = $this->container([Widget::class]);
+        $app->singleton('widgets', fn () => new Widget());
+        $app->alias('widgets', Widget::class);
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel([
+            'a' => fn () => $app->make(Widget::class),
+            'b' => fn () => $app->make(Widget::class),
+        ]);
+
+        $this->assertNotSame($results['a'], $results['b'], 'config/async.php is written in class names');
+    }
+
+    /**
+     * Two coroutines of one request see one instance, even when both build it.
+     *
+     * A request is not one coroutine: a handler spawns more, and they all share the
+     * request's services. A factory that yields — every real one does, it talks to the
+     * database — lets a sibling reach the same alias before the first has published
+     * anything, and the loser of that race must be dropped rather than handed out.
+     */
+    public function test_siblings_of_one_request_share_the_instance_built_first(): void
+    {
+        $app = $this->container();
+
+        $built = 0;
+        $app->bind('widgets', function () use (&$built) {
+            /* Stands in for the I/O a real factory does while building. */
+            \Async\delay(10);
+            $built++;
+
+            return new Widget();
+        });
+
+        $resolved = 0;
+        $app->afterResolving('widgets', function () use (&$resolved) {
+            $resolved++;
+        });
+
+        $app->enableAsyncMode();
+
+        $results = $this->runSiblings([
+            'a' => fn () => $app->make('widgets'),
+            'b' => fn () => $app->make('widgets'),
+        ]);
+
+        $this->assertSame(2, $built, 'the test is worthless unless both coroutines really raced');
+        $this->assertSame($results['a'], $results['b'], 'one request, one instance');
+        $this->assertSame(1, $resolved, 'the instance nobody receives must not be announced as resolved');
+    }
+
+    /**
+     * Coroutines of one and the same scope — siblings within a request, as opposed to
+     * {@see AsyncTestCase::runParallel}, which gives each closure a scope of its own
+     * and so models separate requests.
+     */
+    private function runSiblings(array $coroutines): array
+    {
+        $results = [];
+        $scope = new \Async\Scope();
+
+        foreach ($coroutines as $key => $fn) {
+            $scope->spawn(function () use ($key, $fn, &$results) {
+                $results[$key] = $fn();
+            });
+        }
+
+        $scope->awaitCompletion(\Async\timeout(5000));
+
+        return $results;
+    }
+
     public function test_facade_is_not_pinned_to_the_boot_time_instance(): void
     {
         $app = $this->container([]);
@@ -262,5 +436,17 @@ class Widget
     public function identify(): int
     {
         return spl_object_id($this);
+    }
+}
+
+/**
+ * What a replacing extender returns: a different object, of a different type, wrapping
+ * the one the factory built.
+ */
+class DecoratedWidget extends Widget
+{
+    public function __construct(public readonly Widget $inner)
+    {
+        parent::__construct('decorated');
     }
 }

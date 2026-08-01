@@ -220,6 +220,17 @@ class AsyncServiceProvider extends ServiceProvider
             return;
         }
 
+        // StartSession is a singleton that takes the manager in its constructor, so the
+        // first coroutine through the pipeline would decide whose session every later
+        // request reads and writes — including which session cookie it leaves with.
+        $this->app->scoped(
+            \Illuminate\Session\Middleware\StartSession::class,
+            fn ($app) => new \Illuminate\Session\Middleware\StartSession(
+                $app->make(\Illuminate\Session\SessionManager::class),
+                fn () => $app->make(\Illuminate\Contracts\Cache\Factory::class),
+            ),
+        );
+
         // A custom session handler is registered on the manager during boot
         // (Session::extend('mongo', ...)), so a coroutine building its own manager
         // would report the driver as unsupported.

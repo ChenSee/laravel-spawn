@@ -211,6 +211,34 @@ class AuthIsolationTest extends AsyncTestCase
         );
     }
 
+    /**
+     * A driver registered twice is the registration made last, in a coroutine as at boot.
+     *
+     * Two ways exist to register the same driver name — viaRequest() and extend() — and
+     * the manager keeps whichever came last. A coroutine that adopts the earlier one
+     * authenticates every request with a guard the application replaced on purpose.
+     */
+    public function test_a_driver_re_registered_with_extend_keeps_the_later_registration(): void
+    {
+        $app = $this->bootedApp();
+
+        /* The application overrides the driver its own package registered via viaRequest(). */
+        Auth::extend(BotTokenAuthServiceProvider::DRIVER, fn ($container) => new RequestGuard(
+            fn () => new BotUser('from-extend'),
+            $container['request'],
+        ));
+
+        $this->assertSame('from-extend', $app->make('auth')->guard('bot')->user()->token, 'last one wins at boot');
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel([
+            'a' => fn () => $this->withRequest('a', fn () => $app->make('auth')->guard('bot')->user()->token),
+        ]);
+
+        $this->assertSame('from-extend', $results['a'], 'and last one wins in a coroutine');
+    }
+
     public function test_manager_rebound_by_the_application_still_gets_its_registrations(): void
     {
         $app = $this->bootedApp([]);
@@ -234,6 +262,30 @@ class AuthIsolationTest extends AsyncTestCase
         ]);
 
         $this->assertSame(['a' => 'a', 'b' => 'b'], $results);
+    }
+
+    /**
+     * scopedSingleton() is what replaces a scoped service, and it replaces it whole.
+     *
+     * A test that wants a double in place of the auth manager has one way to install
+     * it: the container binding a coroutine actually builds from. It takes precedence
+     * over the ordinary binding, it reaches the facade as well as make(), and the
+     * seeder leaves an object it does not recognise alone.
+     */
+    public function test_a_scoped_singleton_replaces_the_manager_for_every_coroutine(): void
+    {
+        $app = $this->bootedApp();
+        $double = new AuthManagerDouble();
+
+        $app->scopedSingleton('auth', fn () => $double);
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel([
+            'a' => fn () => $this->withRequest('a', fn () => [$app->make('auth'), Auth::guard('bot')]),
+        ]);
+
+        $this->assertSame($double, $results['a'][0], 'make() must reach the double');
+        $this->assertSame('double', $results['a'][1], 'and so must the facade');
     }
 
     public function test_a_service_never_resolved_at_boot_reports_its_own_missing_driver(): void
@@ -415,6 +467,18 @@ class SessionManagerStub
 
     public function extend(string $driver, \Closure $callback): void
     {
+    }
+}
+
+/**
+ * What a test puts in place of the auth manager: not an AuthManager at all, which is
+ * the case a seeder has to survive.
+ */
+class AuthManagerDouble
+{
+    public function guard(?string $name = null): string
+    {
+        return 'double';
     }
 }
 

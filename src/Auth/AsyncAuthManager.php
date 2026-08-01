@@ -13,52 +13,22 @@ use Illuminate\Auth\AuthManager;
  * coroutine that builds its own manager from that factory starts with none of
  * them. seedInto() carries them across.
  *
+ * The one thing a stock manager cannot report is whether the application replaced
+ * its user resolver or left the constructor default, and the difference matters:
+ * the default resolves through the manager that created it, so adopting it would
+ * send every coroutine back to the boot-time one.
+ *
  * In every other respect this is the stock manager, and deliberately so: the same
  * class serves bootstrap, artisan and queue workers, where nothing is per-coroutine.
  */
 class AsyncAuthManager extends AuthManager
 {
     /**
-     * Callbacks handed to viaRequest(), by driver name. Holds an entry only while
-     * $customCreators holds the wrapper built for that same callback.
-     */
-    private array $requestGuardCallbacks = [];
-
-    /**
      * True once the application supplied its own user resolver, as opposed to the
      * constructor default — which resolves through the manager that created it and
      * must never be handed to another one.
      */
     private bool $userResolverReplaced = false;
-
-    /**
-     * Register a request-callback guard, remembering the callback itself.
-     *
-     * The guard is built exactly as upstream builds it. What makes it safe to adopt
-     * elsewhere is the callback kept here: a wrapper closes over the manager that made
-     * it, so another manager has to build its own from the original callback.
-     *
-     * @param  callable  $callback  receives the request and the user provider, returns the user or null
-     */
-    public function viaRequest($driver, callable $callback)
-    {
-        $manager = parent::viaRequest($driver, $callback);
-
-        // After extend(), which drops the record for whichever driver it replaces.
-        $this->requestGuardCallbacks[$driver] = $callback;
-
-        return $manager;
-    }
-
-    /**
-     * A driver registered twice keeps its last registration, request-callback or not.
-     */
-    public function extend($driver, Closure $callback)
-    {
-        unset($this->requestGuardCallbacks[$driver]);
-
-        return parent::extend($driver, $callback);
-    }
 
     public function resolveUsersUsing(Closure $userResolver)
     {
@@ -76,9 +46,6 @@ class AsyncAuthManager extends AuthManager
      *
      * Neither manager has to be an AsyncAuthManager — an application is free to bind
      * its own, and losing its registrations is exactly the failure being prevented.
-     * What such a prototype cannot offer is the callback behind a viaRequest driver:
-     * its wrapper is adopted whole, and while extend() re-binds $this to the target,
-     * the wrapper still asks the container to keep the guard in step with 'request'.
      *
      * Re-binding reaches $this and nothing else. A registration that captured a
      * manager or a guard with `use` goes on resolving against what it captured, in
@@ -86,16 +53,10 @@ class AsyncAuthManager extends AuthManager
      */
     public static function seedInto(AuthManager $target, AuthManager $prototype): void
     {
-        $requestGuards = $prototype instanceof self ? $prototype->requestGuardCallbacks : [];
-
-        foreach ($requestGuards as $driver => $callback) {
-            $target->viaRequest($driver, $callback);
-        }
-
         foreach ($prototype->customCreators as $driver => $creator) {
             // A static closure cannot be bound, so extend() stored null for it and there
             // is nothing here to adopt — it was already broken at registration.
-            if (isset($requestGuards[$driver]) || ! $creator instanceof Closure) {
+            if (! $creator instanceof Closure) {
                 continue;
             }
 

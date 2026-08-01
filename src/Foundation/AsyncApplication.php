@@ -146,13 +146,16 @@ class AsyncApplication extends Application
         // coroutine alike, so a seeder still recognises what it is handed.
         $decorated = $closure($this->instances[$alias], $this);
 
+        $this->instances[$alias] = $decorated;
+
         if ($this->asyncMode) {
+            // Both, and in step: the template is what seeders are handed, and a
+            // container instance that differs from it reads as a deliberate
+            // replacement — which this is not.
             $this->scopedPrototypes[$alias] = $decorated;
 
             return;
         }
-
-        $this->instances[$alias] = $decorated;
 
         $this->rebound($alias);
     }
@@ -300,6 +303,14 @@ class AsyncApplication extends Application
             return null;
         }
 
+        // instance() names the exact object to use, which outranks scoping — otherwise
+        // a test swapping a service for a mock would be answered with the real one.
+        // The template captured at startup is not such a replacement.
+        if (isset($this->instances[$alias])
+            && ($this->scopedPrototypes[$alias] ?? null) !== $this->instances[$alias]) {
+            return $this->instances[$alias];
+        }
+
         $ctx = $this->scopeContext();
         $ctxKey = $key ?? $alias;
 
@@ -408,7 +419,9 @@ class AsyncApplication extends Application
     private function captureScopedPrototypes(): void
     {
         foreach ($this->scopedAliases() as $alias) {
-            if (isset($this->instances[$alias])) {
+            // Never a second time: extend() keeps the template up to date while serving,
+            // and re-reading the container instance would undo that.
+            if (isset($this->instances[$alias]) && ! isset($this->scopedPrototypes[$alias])) {
                 $this->scopedPrototypes[$alias] = $this->instances[$alias];
             }
         }

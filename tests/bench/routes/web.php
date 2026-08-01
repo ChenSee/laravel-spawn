@@ -35,6 +35,35 @@ $router->get('/boom', function () {
     throw new \RuntimeException('boom');
 });
 
+// Request-scope probe (RequestScopeE2ETest, TrueAsyncServer only): a handler that
+// spawns a coroutine of its own, as anything doing work in parallel does. The nested
+// coroutine resolves the scoped service FIRST — that is the case that tells the two
+// candidate contexts apart, because a context reaches its parents but never its
+// children. Under request_context() both coroutines share this request's redirector;
+// under current_context() the nested one gets a second redirector of its own, whose
+// flashed data the response never sees.
+//
+// `request_scope` reports whether this process even has request scopes: they are
+// assigned by the server extension, so under DevServer or in a unit test the answer
+// is null and the probe proves nothing.
+$router->get('/request-scope', function () {
+    $inner = null;
+
+    $nested = \Async\Scope::inherit();
+    $nested->spawn(function () use (&$inner) {
+        $inner = spl_object_id(app('redirect'));
+    });
+    $nested->awaitCompletion(\Async\timeout(2000));
+
+    $outer = spl_object_id(app('redirect'));
+
+    return response()->json([
+        'request_scope' => \Async\request_context() !== null,
+        'shared'        => $inner === $outer,
+        'id'            => $outer,
+    ]);
+});
+
 // SSE probe (StreamingE2ETest, TrueAsyncServer only): writes directly to the
 // raw HttpResponse and closes it, so TrueAsyncServer::sendResponse() must skip
 // the buffered path entirely once isClosed() is true.
