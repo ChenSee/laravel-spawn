@@ -128,6 +128,13 @@ class AsyncServiceProvider extends ServiceProvider
                 \Laravel\Socialite\Contracts\Factory::class,
                 fn ($app) => new \Laravel\Socialite\SocialiteManager($app),
             );
+
+            // Socialite::extend('gitlab', ...) in a provider's boot() is the documented
+            // way to add a provider it does not ship with.
+            $this->app->scopedSeeder(
+                \Laravel\Socialite\Contracts\Factory::class,
+                \Spawn\Laravel\Foundation\ManagerRegistrations::seed(...),
+            );
         }
     }
 
@@ -216,16 +223,7 @@ class AsyncServiceProvider extends ServiceProvider
         // A custom session handler is registered on the manager during boot
         // (Session::extend('mongo', ...)), so a coroutine building its own manager
         // would report the driver as unsupported.
-        $this->app->scopedSeeder('session', function (object $coroutineManager, object $bootManager): void {
-            if (! $coroutineManager instanceof \Illuminate\Support\Manager
-                || ! $bootManager instanceof \Illuminate\Support\Manager) {
-                return;
-            }
-
-            foreach ((fn () => $this->customCreators)->call($bootManager) as $driver => $creator) {
-                $coroutineManager->extend($driver, $creator);
-            }
-        });
+        $this->app->scopedSeeder('session', \Spawn\Laravel\Foundation\ManagerRegistrations::seed(...));
     }
 
     private function registerTelescopeAdapter(): void

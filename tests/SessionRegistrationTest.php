@@ -37,4 +37,25 @@ class SessionRegistrationTest extends AsyncTestCase
         $this->assertInstanceOf(\SessionHandler::class, $results['a']);
         $this->assertNotSame($results['a'], $results['b'], 'each coroutine builds its own handler');
     }
+
+    public function test_socialite_driver_registered_at_boot_is_available_in_a_coroutine(): void
+    {
+        $app = $this->bootedApp([]);
+        $app->singleton(
+            \Laravel\Socialite\Contracts\Factory::class,
+            fn ($container) => new \Laravel\Socialite\SocialiteManager($container),
+        );
+
+        $app->make(\Laravel\Socialite\Contracts\Factory::class)->extend('acme', fn () => new \stdClass());
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel([
+            'a' => fn () => $app->make(\Laravel\Socialite\Contracts\Factory::class)->driver('acme'),
+            'b' => fn () => $app->make(\Laravel\Socialite\Contracts\Factory::class)->driver('acme'),
+        ]);
+
+        $this->assertInstanceOf(\stdClass::class, $results['a']);
+        $this->assertNotSame($results['a'], $results['b'], 'each coroutine builds its own driver');
+    }
 }

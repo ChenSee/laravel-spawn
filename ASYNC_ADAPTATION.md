@@ -236,7 +236,21 @@ never called.
 Set `'diagnostics' => true` in `config/async.php` to have the worker report at startup
 which scoped services bootstrap configured and no seeder covers.
 
-`auth` is handled by the package itself ([`AsyncAuthManager`](src/Auth/AsyncAuthManager.php)).
+Anything built on `Illuminate\Support\Manager` — session, Socialite, and whatever an
+application makes scoped — is served by
+[`ManagerRegistrations`](src/Foundation/ManagerRegistrations.php), which adopts the
+drivers registered through `extend()`:
+
+```php
+$app->scopedSeeder(SomePackage\Manager::class, ManagerRegistrations::seed(...));
+```
+
+`auth` has its own ([`AsyncAuthManager`](src/Auth/AsyncAuthManager.php)) because
+`AuthManager` is not a `Manager`.
+
+A service that is **not** scoped needs none of this. `Blade::directive()` and
+`Blade::extend()` write into a shared compiler, `Cache::extend()` into a shared cache
+manager: one object, configured once, seen by every coroutine.
 
 ### Writing a custom adapter
 
