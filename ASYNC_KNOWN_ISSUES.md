@@ -106,33 +106,54 @@ fails identically on `master`.
 
 ## 6. Strategy
 
-Ordered by damage per unit of work, not by difficulty. Each item is a separate PR: they
-touch different subsystems and want different reviewers.
+### The one cause
 
-**First — the audit, not a fix.** List every singleton whose factory or constructor
-resolves a scoped alias. That list decides how much of #30 and the rest is really one bug.
-Two were found by accident (`StartSession`, `Redirector`); finding the third by accident
-is not a plan. A PHPStan rule in the shape of the existing `MutableStaticPropertyRule`
-could make this permanent.
+Laravel's container knows two lifetimes: transient, and singleton for the life of the
+process. An async worker needs a third — for the life of a request. Every item above is
+a place where state belonging to one request ended up in an object living for the life
+of the process, or the reverse.
 
-**Second — one mechanism for facades (#30, part of #32).** The proxy cannot cover
-services that are passed to typed parameters, which is why `cookie` was excluded. A
-context-delegating subclass — the `AsyncConfig` pattern — serves both the type and the
-facade, and would retire `FACADE_PROXIED_MAP` rather than extend it. Doing this once for
-`CookieJar`, `Request` and `UrlGenerator` closes #30 and #32 together.
+That is why fixing them one alias at a time does not converge. `StartSession` and
+`Redirector` were both found by accident; the list of services nobody has looked at yet
+is not shorter for having found those two.
 
-**Third — one mechanism for per-request reset (#34, #35, the rest of #33).** Octane
-solves this with listeners that flush known objects between requests. The three servers
-here need the same hook: terminating callbacks, `Vite::flush()`, anything else that
-accumulates. One hook, a list, and a place for packages to add to it.
+### The moves, in order
 
-**Fourth — Blade render state (#31).** The largest, and the only one where an
-application sees corrupt output rather than wrong data. `AsyncViewFactory` already
-isolates shared data; the render stack needs the same treatment, and the work is
-mechanical once the pattern is set.
+**1. Relocate storage instead of reimplementing resolution.** `tryResolveScoped()`
+currently re-implements half of `Container::resolve()`, which is exactly where §3 comes
+from — contextual bindings, `buildStack`, `beforeResolving`, the `resolved()` flag. The
+strong form is the opposite: keep `parent::resolve()`, and move only the *storage*. Seed
+`$this->instances[$alias]` from the context before delegating; move the result back into
+the context afterwards. Every container semantic is then inherited rather than
+re-written, and the custom extender loop, callback firing and race guard all disappear.
 
-**Fifth — the container contract (§3).** Worth doing before the package is depended on
-widely, because every gap is a surprise for somebody writing tests against it.
+**2. One registry of lifetime, not four.** Today: the `ScopedService` enum, the config
+list, `scopedBindings`, and Laravel's own `scopedInstances`. One public method, one
+source of truth, with the enum as nothing more than the default set.
+
+**3. Make "a singleton captured a per-request object" impossible to miss.** At worker
+start, walk the resolved singletons and report any holding a reference to a per-request
+object; add a PHPStan rule, beside the existing `MutableStaticPropertyRule`, for a
+constructor parameter typed as one. This is the only measure that covers third-party
+code nobody has read.
+
+**4. Facades: stop caching rather than proxy.** `FACADE_PROXIED_MAP` cannot be completed:
+a service passed to a typed parameter cannot be a proxy, which is why `cookie` and
+`redirect` are excluded — `RoutingServiceProvider` hands `$app['redirect']` to
+`ResponseFactory::__construct(Redirector $redirector)`. Flushing the facade cache between
+requests, as Octane does, needs no list of names at all. Delegating subclasses stay only
+where a real type is required.
+
+**5. One per-request reset hook (#33, #34, #35).** Terminating callbacks, `Vite`,
+`Context`, deferred callbacks — one shape, one list the servers flush between requests,
+and a place for packages to add to it.
+
+**6. Blade render state (#31).** The only item where an application sees corrupt output
+rather than wrong data. The factory stays shared; the render stack moves into the
+context, which is the existing adapter pattern taken to its end.
+
+Order: 1 and 2 first — they remove code rather than add it, and close §3 as a side
+effect. Then 3, which buys the most insight per line. Then 4, 5, 6.
 
 **Not on this list:** the design limitations in §2. They are pinned by tests and
 documented; removing them needs a different design, not a fix.
