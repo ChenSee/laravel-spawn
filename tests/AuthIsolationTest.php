@@ -352,6 +352,35 @@ class AuthIsolationTest extends AsyncTestCase
         );
     }
 
+    public function test_redirector_flashes_into_the_session_of_its_own_coroutine(): void
+    {
+        $app = $this->bootedApp();
+        $app->singleton('session', fn () => new SessionManagerStub());
+        $app->singleton('session.store', fn ($container) => $container->make('session')->driver());
+        $app->singleton('url', fn () => new \Illuminate\Routing\UrlGenerator(
+            new \Illuminate\Routing\RouteCollection(),
+            Request::create('/', 'GET'),
+        ));
+        $app->enableAsyncMode();
+
+        $flashTarget = fn (string $token) => $this->withRequest($token, function () use ($app) {
+            $redirector = $app->make('redirect');
+
+            return spl_object_id((fn () => $this->session)->call($redirector));
+        });
+
+        $results = $this->runParallel([
+            'a' => fn () => $flashTarget('a'),
+            'b' => fn () => $flashTarget('b'),
+        ]);
+
+        $this->assertNotSame(
+            $results['a'],
+            $results['b'],
+            'redirect()->with() must reach the session of the request that redirected',
+        );
+    }
+
     public function test_auth_driver_alias_resolves_the_guard_of_its_coroutine(): void
     {
         $app = $this->bootedApp();
@@ -377,11 +406,11 @@ class AuthIsolationTest extends AsyncTestCase
  */
 class SessionManagerStub
 {
-    private ?\stdClass $driver = null;
+    private ?\Illuminate\Session\Store $driver = null;
 
-    public function driver(): \stdClass
+    public function driver(): \Illuminate\Session\Store
     {
-        return $this->driver ??= new \stdClass();
+        return $this->driver ??= new \Illuminate\Session\Store('async-test', new \SessionHandler());
     }
 
     public function extend(string $driver, \Closure $callback): void
