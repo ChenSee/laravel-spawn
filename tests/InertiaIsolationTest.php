@@ -2,6 +2,7 @@
 
 namespace Spawn\Laravel\Tests;
 
+use Illuminate\Config\Repository;
 use Inertia\ResponseFactory;
 
 use function Async\delay;
@@ -10,6 +11,15 @@ class InertiaIsolationTest extends AsyncTestCase
 {
     private function makeFactory(string $class = ResponseFactory::class): ResponseFactory
     {
+        // Inertia asks its DevTools whether to record on every share(), and DevTools
+        // reads the configuration, so the factory needs a container behind it.
+        // Recording stays off: these tests are about per-coroutine state, and the
+        // recorder is a container singleton that would add shared state of its own.
+        $app = $this->createApp();
+        $app->singleton('config', fn () => new Repository([
+            'inertia' => ['devtools' => ['enabled' => false]],
+        ]));
+
         return new $class();
     }
 

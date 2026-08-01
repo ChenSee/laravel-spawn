@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Redis connection pool (#23) — `RedisManager` shares one connection with every coroutine, so concurrent commands used to interleave on a single socket (protocol errors, `unserialize()` failures under load)
+  - `AsyncPhpRedisConnector` — builds pooled clients: connection settings move to the `Redis` constructor (pool mode rejects `connect()`), the rest is applied to the template as before
+  - `RedisPool::configure()` — installs the connector into `RedisManager` and purges anything resolved during bootstrap; called by all three servers
+  - `config/async.php` — new `redis_pool` section: `enabled`, `min`, `max`, `mux`
+  - Requires the TrueAsync build of phpredis; Redis Cluster is not pooled
 - Laravel Debugbar compatibility (#14) — Debugbar now renders under async serving, with per-coroutine data isolation
   - `AsyncDebugbar` — one instance per worker; request state (collected snapshot, `responseIsModified`) kept per-coroutine via `current_context()`; persistent storage disabled (its inline I/O in `collect()` would break render atomicity under concurrency)
   - Context-backed collectors (`messages`, `time`, `exceptions`, `query`) via `DelegatesToContext` — one shared instance, per-coroutine data, so concurrent requests never mix debug data (`events`/`models` are a follow-up)
@@ -34,6 +39,7 @@
   - `HttpE2ETest` + `tests/e2e/run.php` — in-process HTTP end-to-end suite: boots the bench fixture in a real worker thread (`spawn_thread`) and drives it over a loopback socket with concurrent coroutine clients (routing, per-request isolation across an I/O yield, error resilience) — no external server process, teardown via the DevServer's own SIGTERM handler
 
 ### Fixed
+- `TrueAsyncServer` bootloader returned early when `async.db_pool.enabled` was false, skipping every `bootCompleted()` call after it (view, permission, inertia, translator, config, events, router)
 - `DevServer` request exception handler had a 1-arg `Throwable` signature but the scope invokes it with `(Scope, Coroutine, Throwable)` — every request error was swallowed by a `TypeError`; signature corrected
 - `RequestParser` did not set `REMOTE_ADDR`, so `Request::getClientIp()` returned `null` — `DevServer` now passes the socket peer address (fixes Debugbar and anything else reading the client IP)
 
