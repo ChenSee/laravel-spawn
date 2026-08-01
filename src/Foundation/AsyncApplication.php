@@ -114,6 +114,31 @@ class AsyncApplication extends Application
     }
 
     /**
+     * Record the extender even when the service has already been resolved.
+     *
+     * The container skips that for a resolved service, and for a shared one it is
+     * right: decorating the single instance is the whole job, there will be no second
+     * resolve. A scoped service is resolved again in every coroutine, so the extender
+     * has to be kept — otherwise the decoration reaches the boot-time object and
+     * nobody else, silently.
+     */
+    public function extend($abstract, Closure $closure)
+    {
+        $alias = $this->getAlias($abstract);
+
+        if (! isset($this->instances[$alias]) || ! $this->isScopedAlias($alias)) {
+            parent::extend($abstract, $closure);
+
+            return;
+        }
+
+        $this->extenders[$alias][] = $closure;
+        $this->instances[$alias]   = $closure($this->instances[$alias], $this);
+
+        $this->rebound($alias);
+    }
+
+    /**
      * Teach the container how to carry boot-time configuration onto per-coroutine
      * instances of a scoped service.
      *
@@ -370,6 +395,25 @@ class AsyncApplication extends Application
                 .'scopedSeeder()/scopedSingleton(); coroutines will get an unconfigured instance'
             );
         }
+    }
+
+    /**
+     * Whether this alias gets a fresh instance per coroutine.
+     *
+     * Fills the config-declared half of the answer on first use, because extend() can
+     * run long before async mode is switched on and the cache is built.
+     */
+    private function isScopedAlias(string $alias): bool
+    {
+        if (ScopedService::tryFrom($alias) !== null || isset($this->scopedBindings[$alias])) {
+            return true;
+        }
+
+        if ($this->scopedServiceCache === [] && $this->resolved('config')) {
+            $this->scopedServiceCache = array_flip($this->make('config')->get('async.scoped_services', []));
+        }
+
+        return isset($this->scopedServiceCache[$alias]);
     }
 
     /**

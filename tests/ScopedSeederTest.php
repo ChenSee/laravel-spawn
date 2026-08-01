@@ -47,6 +47,26 @@ class ScopedSeederTest extends AsyncTestCase
         $this->assertTrue($results['a']->decorated, 'extend() is part of how a service is built');
     }
 
+    public function test_extend_registered_after_the_first_resolve_still_decorates(): void
+    {
+        $app = $this->container();
+        $app->singleton('widgets', fn () => new Widget());
+
+        /* A provider that resolves the service and only then decorates it. */
+        $app->make('widgets');
+        $app->extend('widgets', function (Widget $widget) {
+            $widget->decorated = true;
+
+            return $widget;
+        });
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel(['a' => fn () => $app->make('widgets')]);
+
+        $this->assertTrue($results['a']->decorated, 'a scoped service is resolved again after extend()');
+    }
+
     public function test_after_resolving_callback_fires_once_per_instance(): void
     {
         $app = $this->container();
