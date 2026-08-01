@@ -67,6 +67,75 @@ class ScopedSeederTest extends AsyncTestCase
         $this->assertTrue($results['a']->decorated, 'a scoped service is resolved again after extend()');
     }
 
+    public function test_extend_registered_while_serving_reaches_later_coroutines(): void
+    {
+        $app = $this->container();
+        $app->singleton('widgets', fn () => new Widget());
+        $app->make('widgets');
+        $app->enableAsyncMode();
+
+        /* A deferred provider loaded inside the first request decorates the service. */
+        $this->runParallel(['first' => function () use ($app) {
+            $app->extend('widgets', function (Widget $widget) {
+                $widget->decorated = true;
+
+                return $widget;
+            });
+        }]);
+
+        $results = $this->runParallel(['later' => fn () => $app->make('widgets')]);
+
+        $this->assertTrue($results['later']->decorated);
+    }
+
+    public function test_scoped_bindings_of_the_framework_are_resolved_per_coroutine(): void
+    {
+        $app = $this->container([]);
+
+        /* Laravel's own request-scoped registration, which only a queue worker flushes. */
+        $app->scoped('widgets', fn () => new Widget());
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel([
+            'a' => fn () => $app->make('widgets'),
+            'b' => fn () => $app->make('widgets'),
+        ]);
+
+        $this->assertNotSame($results['a'], $results['b']);
+    }
+
+    public function test_a_service_declared_scoped_by_class_name_is_scoped(): void
+    {
+        $app = $this->container([Widget::class]);
+        $app->bind('widgets', fn () => new Widget());
+        $app->alias('widgets', Widget::class);
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel([
+            'a' => fn () => $app->make(Widget::class),
+            'b' => fn () => $app->make(Widget::class),
+        ]);
+
+        $this->assertNotSame($results['a'], $results['b'], 'config/async.php is written in class names');
+    }
+
+    public function test_a_build_with_parameters_is_not_served_from_the_context(): void
+    {
+        $app = $this->container();
+        $app->bind('widgets', fn ($container, array $parameters) => new Widget($parameters['mark'] ?? null));
+
+        $app->enableAsyncMode();
+
+        $results = $this->runParallel(['a' => function () use ($app) {
+            $app->make('widgets');
+
+            return $app->makeWith('widgets', ['mark' => 'built-for-me']);
+        }]);
+
+        $this->assertSame('built-for-me', $results['a']->mark, 'parameters must reach the factory');
+    }
+
     public function test_after_resolving_callback_fires_once_per_instance(): void
     {
         $app = $this->container();
@@ -175,6 +244,10 @@ class Widget
     public bool $decorated = false;
 
     private array $registered = [];
+
+    public function __construct(public readonly ?string $mark = null)
+    {
+    }
 
     public function register(array $names): void
     {

@@ -93,7 +93,9 @@ class AsyncAuthManager extends AuthManager
         }
 
         foreach ($prototype->customCreators as $driver => $creator) {
-            if (isset($requestGuards[$driver])) {
+            // A static closure cannot be bound, so extend() stored null for it and there
+            // is nothing here to adopt — it was already broken at registration.
+            if (isset($requestGuards[$driver]) || ! $creator instanceof Closure) {
                 continue;
             }
 

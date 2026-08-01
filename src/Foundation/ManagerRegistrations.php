@@ -28,6 +28,12 @@ final class ManagerRegistrations
         }
 
         foreach ((fn () => $this->customCreators)->call($prototype) as $driver => $creator) {
+            // A static closure cannot be bound, so Manager::extend() stored null for it
+            // and there is nothing here to adopt — it was already broken at registration.
+            if (! $creator instanceof \Closure) {
+                continue;
+            }
+
             // extend() re-binds the creator to the target, so an adopted registration
             // resolves against this coroutine's manager.
             $target->extend($driver, $creator);
