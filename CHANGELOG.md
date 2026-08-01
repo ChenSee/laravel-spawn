@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Redis connection pool (#23) — `RedisManager` shares one connection with every coroutine, so concurrent commands used to interleave on a single socket (protocol errors, `unserialize()` failures under load)
+  - `AsyncPhpRedisConnector` — builds pooled clients: connection settings move to the `Redis` constructor (pool mode rejects `connect()`), the rest is applied to the template as before
+  - `RedisPool::configure()` — installs the connector into `RedisManager` and purges anything resolved during bootstrap; called by all three servers
+  - `config/async.php` — new `redis_pool` section: `enabled`, `min`, `max`, `mux`
+  - Requires the TrueAsync build of phpredis; Redis Cluster is not pooled
 - Laravel Debugbar compatibility (#14) — Debugbar now renders under async serving, with per-coroutine data isolation
   - `AsyncDebugbar` — one instance per worker; request state (collected snapshot, `responseIsModified`) kept per-coroutine via `current_context()`; persistent storage disabled (its inline I/O in `collect()` would break render atomicity under concurrency)
   - Context-backed collectors (`messages`, `time`, `exceptions`, `query`) via `DelegatesToContext` — one shared instance, per-coroutine data, so concurrent requests never mix debug data (`events`/`models` are a follow-up)
@@ -36,6 +41,7 @@
 ### Fixed
 - **With `--workers=1` none of the async adaptation ran (#22).** `TrueAsyncServer` did all of its per-worker setup — async mode, the PDO pool, every `bootCompleted()` hook — inside the server's bootloader closure, and the server only consults that closure in pool mode (`workers > 1`). A single-worker run therefore served requests from a plain Laravel app: one shared PDO for all coroutines (`SQLSTATE[HY000] 2014`), one shared Route object, no coroutine-scoped services. The setup moved to `TrueAsyncServer::initializeApp()`, which the bootloader calls in pool mode and `start()` calls in this process otherwise.
 - **Route parameters crossed between concurrent requests (#24).** `RouteCollection` keeps one `Route` object per definition and `match()` binds the request's parameters onto it, so two coroutines on the same route overwrote each other: `$request->route('id')` returned another request's value or null. `AsyncRouter` now clones the matched route per coroutine and resolves `Route::class` from the context instead of binding it into the shared container.
+- `TrueAsyncServer` bootloader returned early when `async.db_pool.enabled` was false, skipping every `bootCompleted()` call after it (view, permission, inertia, translator, config, events, router)
 - `DevServer` request exception handler had a 1-arg `Throwable` signature but the scope invokes it with `(Scope, Coroutine, Throwable)` — every request error was swallowed by a `TypeError`; signature corrected
 - `RequestParser` did not set `REMOTE_ADDR`, so `Request::getClientIp()` returned `null` — `DevServer` now passes the socket peer address (fixes Debugbar and anything else reading the client IP)
 

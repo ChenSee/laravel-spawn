@@ -30,6 +30,7 @@ class FrankenPhpServer implements ServerInterface
         }
 
         $this->configureDatabasePool();
+        \Spawn\Laravel\Redis\RedisPool::configure($this->app);
 
         if (($view = $this->app->make('view')) instanceof \Spawn\Laravel\View\AsyncViewFactory) {
             $view->bootCompleted();

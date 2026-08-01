@@ -201,7 +201,7 @@ class TrueAsyncServer implements ServerInterface
 
     /**
      * Everything a worker needs before its first request: async mode, the
-     * connection pool, and the bootCompleted() hooks of every adapter.
+     * database and Redis pools, and the bootCompleted() hooks of every adapter.
      *
      * Runs once per worker thread, or once in this process when the server is
      * not in pool mode.
@@ -215,6 +215,10 @@ class TrueAsyncServer implements ServerInterface
         }
 
         self::configureDatabasePool($app);
+
+        // Redis needs the same treatment: one shared connection would let
+        // concurrent coroutines interleave commands on a single socket.
+        \Spawn\Laravel\Redis\RedisPool::configure($app);
 
         if (($view = $app->make('view')) instanceof \Spawn\Laravel\View\AsyncViewFactory) {
             $view->bootCompleted();
