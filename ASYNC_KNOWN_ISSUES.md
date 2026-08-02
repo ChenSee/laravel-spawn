@@ -4,7 +4,53 @@ Findings from the review of #29 (issue #24, auth registrations). Everything here
 verified by reading the vendored framework source or by running the suite; where a
 claim is reasoning rather than an observed failure, it says so.
 
-Nothing in this file is fixed by #29. What #29 does fix is in `CHANGELOG.md`.
+What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
+
+---
+
+## 0. Where things stand
+
+- Work is on `fix/24-scoped-boot-registrations`, open as **PR #29** against `master`.
+  149 tests, green, CI green.
+- Six findings are filed as **issues #30–#35** (table in §1). None is fixed.
+- The strategy is §6: one cause, and the moves in order. Move 2 is done; move 1 is
+  rejected, with the reasons. **Next is move 3 — the audit.**
+
+### Next, in order
+
+1. **Audit the singletons that capture a per-request service** (§6.3). List every
+   binding whose factory or constructor resolves one of the per-request aliases.
+   `StartSession` and `Redirector` were both found by accident; this turns that into a
+   procedure. Deliverable: the list, plus a PHPStan rule beside
+   `MutableStaticPropertyRule`. Acceptance: the rule flags `StartSession` as it was
+   written before #29.
+2. **#30 — facades.** Flush the facade cache between requests instead of extending
+   `FACADE_PROXIED_MAP`, which cannot be completed. Acceptance: `Cookie::queue()` in one
+   coroutine reaches that coroutine's response, with a test that fails without it.
+3. **#34, #35, rest of #33 — one per-request reset hook** shared by the three servers.
+4. **#31 — Blade render state** into the context, factory stays shared.
+5. The container contract gaps (§3) — only after the shape in §6.1 has a concurrency
+   harness behind it.
+
+### Working notes, so a cold start does not repeat today
+
+- Suite: `docker run --rm -v "$PWD":/app -w /app trueasync/php-true-async:latest php vendor/bin/phpunit --colors=never`
+- Benchmark: same, with `php tests/bench/bench_resolve.php 200000`
+- **If `tests/StreamingE2ETest.php` fails with `Call to undefined function trueasync_response()`,
+  the autoloader is stale, not the image.** That function is defined in this package's own
+  `src/helpers.php` and reaches PHP through composer's `autoload.files`. Regenerate:
+  `composer dump-autoload` (CI installs from scratch, which is why CI never saw it).
+- The local `php-src` build cannot run the suite: it is configured `--disable-all`, so
+  there is no dom/xml/libxml for PHPUnit. Use the image.
+- PHPStan does not run locally either: no `Phar` extension in that build, and the image
+  times out on it. CI does not run it.
+- `Asyncequest_context()` is always `null` under PHPUnit — the server extension sets it.
+  Anything that depends on it can only be checked end to end.
+- `redirect` cannot be proxied for its facade: `RoutingServiceProvider` passes
+  `$app['redirect']` to `ResponseFactory::__construct(Redirector $redirector)`. Tried;
+  TypeError. Same reason `cookie` is excluded.
+- `AsyncTestCase::runParallel()` returns results in the order the coroutines were given,
+  not the order they finished. A test comparing whole arrays would otherwise flake.
 
 ---
 
