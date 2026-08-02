@@ -44,7 +44,7 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
   there is no dom/xml/libxml for PHPUnit. Use the image.
 - PHPStan does not run locally either: no `Phar` extension in that build, and the image
   times out on it. CI does not run it.
-- `Asyncequest_context()` is always `null` under PHPUnit — the server extension sets it.
+- `Async\request_context()` is always `null` under PHPUnit — the server extension sets it.
   Anything that depends on it can only be checked end to end.
 - `redirect` cannot be proxied for its facade: `RoutingServiceProvider` passes
   `$app['redirect']` to `ResponseFactory::__construct(Redirector $redirector)`. Tried;
