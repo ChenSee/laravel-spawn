@@ -41,6 +41,8 @@ abstract class AsyncTestCase extends TestCase
 
         $scope->awaitCompletion(\Async\timeout(5000));
 
-        return $results;
+        // In the order they were given, not the order they finished: a test comparing
+        // whole result arrays would otherwise pass or fail on scheduling.
+        return array_replace(array_fill_keys(array_keys($coroutines), null), $results);
     }
 }

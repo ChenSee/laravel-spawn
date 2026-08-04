@@ -3,9 +3,13 @@
 namespace Spawn\Laravel\Foundation;
 
 use Closure;
+use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Foundation\Application;
+use Illuminate\Support\Facades\Facade;
 
 use function Async\current_context;
+use function Async\request_context;
+use function Async\root_context;
 
 class AsyncApplication extends Application
 {
@@ -16,6 +20,8 @@ class AsyncApplication extends Application
      *
      * 'cookie' is excluded: AuthManager passes $app['cookie'] to setCookieJar(QueueingFactory).
      * 'auth.driver' is excluded: guards are passed to typed parameters in some middleware.
+     * 'redirect' is excluded: RoutingServiceProvider passes $app['redirect'] to
+     * ResponseFactory::__construct(Redirector $redirector).
      */
     private const FACADE_PROXIED_MAP = [
         'auth'    => true,
@@ -33,10 +39,55 @@ class AsyncApplication extends Application
     private array $scopedBindings = [];
 
     /**
+     * Registration transfer callbacks: abstract => Closure(object $fresh, object $bootInstance).
+     */
+    private array $scopedSeeders = [];
+
+    /**
+     * What the container held for each scoped alias when async mode started:
+     * abstract => object. A missing entry means the service was never resolved
+     * during bootstrap, so it carries no configuration worth transferring.
+     */
+    private array $scopedPrototypes = [];
+
+    /**
      * Cached config('async.scoped_services') as alias => true hash map.
      * Populated once in enableAsyncMode() to avoid per-resolve config lookups.
      */
     private array $scopedServiceCache = [];
+
+    /**
+     * Every alias resolved per coroutine, mapped to the key it is stored under in the
+     * context: alias => ScopedService|string. Answering from one map is what keeps the
+     * check off the hot path — it is consulted on every resolve the application makes.
+     */
+    private array $perRequestKeys = [];
+
+    /**
+     * How many entries of Laravel's own scoped list have been taken in, so that a list
+     * which grows while the worker runs is noticed without walking it every time.
+     */
+    private int $scopedInstancesSeen = 0;
+
+    /**
+     * Guards the config read in perRequestKey() against asking itself the question.
+     */
+    private bool $readingScopedConfig = false;
+
+    /**
+     * Aliases the application deliberately replaced with instance() while serving,
+     * as a set. Such an object is the answer for everyone, scoping or not.
+     */
+    private array $replacedInstances = [];
+
+    public function __construct($basePath = null)
+    {
+        parent::__construct($basePath);
+
+        foreach (ScopedService::cases() as $case) {
+            $this->perRequestKeys[$case->value] = $case;
+        }
+    }
 
     public function isAsyncModeEnabled(): bool
     {
@@ -59,32 +110,152 @@ class AsyncApplication extends Application
         return parent::runningInConsole();
     }
 
+    /**
+     * Switch the container over to per-coroutine resolution of scoped services.
+     *
+     * Call once per worker, after the framework has finished bootstrapping: what
+     * the providers configured during boot is captured here, and everything that
+     * cached a boot-time instance is invalidated. Calling it earlier means the
+     * providers configure objects nobody will ever see again.
+     */
     public function enableAsyncMode(): void
     {
         $this->asyncMode = true;
 
-        if ($this->resolved('config')) {
-            $scoped = $this->make('config')->get('async.scoped_services', []);
-            $this->scopedServiceCache = array_flip($scoped);
+        $config = $this->resolved('config') ? $this->make('config') : null;
+
+        if ($config !== null) {
+            $this->cacheConfiguredScopedServices($config->get('async.scoped_services', []));
+        }
+
+        $this->captureScopedPrototypes();
+        $this->reportPrematureAsyncMode();
+
+        // A facade resolved during bootstrap keeps the boot-time instance in a static
+        // array of its own and would go on handing it to every coroutine, never once
+        // asking offsetGet() for the scoped proxy. Only the proxied aliases are dropped,
+        // because only they get a proxy back; clearing the others would trade a pinned
+        // boot-time instance for a pinned instance of whichever coroutine asked first,
+        // which is worse. Those need a proxy of their own to be fixed at all.
+        foreach (array_keys(self::FACADE_PROXIED_MAP) as $proxied) {
+            Facade::clearResolvedInstance($proxied);
+        }
+
+        if ($config !== null && $config->get('async.diagnostics', false)) {
+            $this->reportScopedServiceRisks();
         }
     }
 
     public function scopedSingleton(string $abstract, Closure $factory): void
     {
-        $this->scopedBindings[$abstract] = $factory;
+        $this->scopedBindings[$this->getAlias($abstract)] = $factory;
+        $this->markPerRequest($abstract);
     }
 
     /**
-     * In async mode 'request' is always resolvable (from context, instances, or fallback).
-     * Returning true here makes rebinding('request', ...) call make('request') instead of
-     * returning null — which prevents a TypeError in UrlGenerator::__construct when the
-     * exception handler renders an error before the first HTTP request is processed.
+     * Record the extender even when the service has already been resolved.
+     *
+     * The container skips that for a resolved service, and for a shared one it is
+     * right: decorating the single instance is the whole job, there will be no second
+     * resolve. A scoped service is resolved again in every coroutine, so the extender
+     * has to be kept — otherwise the decoration reaches the boot-time object and
+     * nobody else, silently.
      */
+    public function extend($abstract, Closure $closure)
+    {
+        $alias = $this->getAlias($abstract);
+
+        if (! isset($this->instances[$alias]) || ! $this->isScopedAlias($alias)) {
+            parent::extend($abstract, $closure);
+
+            return;
+        }
+
+        $this->extenders[$alias][] = $closure;
+
+        // While serving, the boot-time instance is nobody's service any more: it is the
+        // template coroutines are seeded from. Decorating it keeps template and
+        // coroutine alike, so a seeder still recognises what it is handed.
+        $decorated = $closure($this->instances[$alias], $this);
+
+        $this->instances[$alias] = $decorated;
+
+        if ($this->asyncMode) {
+            // Both, and in step: the template is what seeders are handed, and a
+            // container instance that differs from it reads as a deliberate
+            // replacement — which this is not.
+            $this->scopedPrototypes[$alias] = $decorated;
+
+            return;
+        }
+
+        $this->rebound($alias);
+    }
+
+    /**
+     * Teach the container how to carry boot-time configuration onto per-coroutine
+     * instances of a scoped service.
+     *
+     * The seeder receives the freshly built instance and the boot-time one, and is
+     * expected to copy across registrations only — never per-request state, which is
+     * the very thing scoping exists to keep apart.
+     *
+     * Without a seeder, a scoped service is whatever its factory returns: anything a
+     * provider did to the object after construction (extend(), viaRequest(), setters)
+     * stays behind on the boot-time instance.
+     */
+    public function scopedSeeder(string $abstract, Closure $seeder): void
+    {
+        $this->scopedSeeders[$this->getAlias($abstract)] = $seeder;
+    }
+
+    /**
+     * Store the configured list under the same aliases resolution uses.
+     *
+     * config/async.php is written in terms of class names, and half the framework's
+     * services answer to a short alias instead — a service listed as SessionManager::class
+     * would never match the 'session' the container asks about, and would stay shared
+     * with nothing to show for it.
+     *
+     * @param  string[]  $abstracts
+     */
+    private function cacheConfiguredScopedServices(array $abstracts): void
+    {
+        $this->scopedServiceCache = [];
+
+        foreach ($abstracts as $abstract) {
+            $this->scopedServiceCache[$this->getAlias($abstract)] = true;
+            $this->markPerRequest($abstract);
+        }
+    }
+
     /**
      * 'request' is always resolvable: from context, instances, or fallback.
-     * This prevents crashes when code checks bound('request') during bootstrap
-     * (before any HTTP request arrives) — e.g. AuthServiceProvider::registerRequestRebindHandler().
+     *
+     * This keeps code that checks bound('request') during bootstrap from crashing,
+     * before any HTTP request exists — AuthServiceProvider::registerRequestRebindHandler()
+     * among it. It also makes rebinding('request', ...) return make('request') rather
+     * than null, which UrlGenerator::__construct requires when the exception handler
+     * renders an error before the first request is served.
      */
+    /**
+     * Note that an application replaced a service outright.
+     *
+     * A per-request service is answered from the context, which would otherwise ignore
+     * the replacement entirely. 'request' is exempt: the kernel rebinds it on every
+     * request, and that is the scoping working, not somebody overriding it.
+     */
+    public function instance($abstract, $instance)
+    {
+        $alias = $this->getAlias($abstract);
+
+        if ($this->asyncMode && $alias !== 'request') {
+            $this->replacedInstances[$alias] = true;
+        }
+
+        return parent::instance($abstract, $instance);
+    }
+
     public function bound($abstract): bool
     {
         if ($this->getAlias($abstract) === 'request') {
@@ -127,7 +298,10 @@ class AsyncApplication extends Application
             return $this->resolveRequest();
         }
 
-        if ($this->asyncMode) {
+        // Parameters mean a contextual build, which the container answers with a fresh
+        // object every time and never caches. Serving it from the context would hand
+        // back an object built for somebody else's parameters.
+        if ($this->asyncMode && $parameters === []) {
             $instance = $this->tryResolveScoped($alias);
 
             if ($instance !== null) {
@@ -139,12 +313,26 @@ class AsyncApplication extends Application
     }
 
     /**
+     * The context every per-request object of this request lives in.
+     *
+     * The request scope is the one the server assigns per connection and every
+     * coroutine of that request inherits, so a nested Scope::inherit() inside a
+     * handler shares one auth manager and one session with the handler that spawned
+     * it. current_context() is the scope's own, which would give the nested coroutine
+     * a second set of everything — and, at the root, one set shared by all requests.
+     */
+    private function scopeContext(): \Async\Context
+    {
+        return request_context() ?? current_context();
+    }
+
+    /**
      * Resolve the current request from context, instances, or fallback.
      */
     private function resolveRequest(): \Illuminate\Http\Request
     {
         if ($this->asyncMode) {
-            $fromContext = current_context()->find(ScopedService::REQUEST);
+            $fromContext = $this->scopeContext()->find(ScopedService::REQUEST);
             if ($fromContext !== null) {
                 return $fromContext;
             }
@@ -160,14 +348,20 @@ class AsyncApplication extends Application
      */
     private function tryResolveScoped(string $alias): mixed
     {
-        $key = ScopedService::tryFrom($alias);
+        $key = $this->perRequestKey($alias);
 
-        if ($key === null && !isset($this->scopedBindings[$alias]) && !isset($this->scopedServiceCache[$alias])) {
+        if ($key === null) {
             return null;
         }
 
-        $ctx = current_context();
-        $ctxKey = $key ?? $alias;
+        // instance() names the exact object to use, which outranks scoping — otherwise
+        // a test swapping a service for a mock would be answered with the real one.
+        if (isset($this->replacedInstances[$alias]) && isset($this->instances[$alias])) {
+            return $this->instances[$alias];
+        }
+
+        $ctx = $this->scopeContext();
+        $ctxKey = $key;
 
         $instance = $ctx->find($ctxKey);
 
@@ -181,7 +375,14 @@ class AsyncApplication extends Application
             $bindings = $this->getBindings();
             if (isset($bindings[$alias])) {
                 $concrete = $bindings[$alias]['concrete'];
-                $instance = $concrete instanceof \Closure ? $concrete($this) : $this->build($concrete);
+                // Same call shape as Container::build(), which hands the factory the
+                // parameter overrides as a second argument.
+                $instance = $concrete instanceof \Closure ? $concrete($this, []) : $this->build($concrete);
+            } elseif (class_exists($alias)) {
+                // A class the container was never told about — #[Scoped] is discovered
+                // on first resolve, so it arrives here with no binding behind it.
+                // Falling through would let the container keep it as a singleton.
+                $instance = $this->build($alias);
             } else {
                 // No factory registered (e.g. 'request' is stored in instances[], not bindings[]).
                 // Fall through to parent::resolve which handles instances[] correctly.
@@ -189,24 +390,234 @@ class AsyncApplication extends Application
             }
         }
 
-        // Fire only the alias-specific afterResolving callbacks so adapters registered via
-        // afterResolving('session', ...) work for scoped services.
-        //
-        // We intentionally do NOT call fireResolvingCallbacks() here because that also
-        // fires globalAfterResolvingCallbacks — third-party callbacks that may access
-        // services not yet available (e.g. 'request') and crash the worker on boot.
-        $aliasKey = $this->getAlias($alias);
-        foreach ($this->afterResolvingCallbacks[$aliasKey] ?? [] as $cb) {
-            $cb($instance, $this);
+        // extend() registrations live outside the factory, so building from the
+        // concrete alone would silently drop them for scoped services only. They run
+        // before seeding, because a decorating extender replaces the object and the
+        // registrations have to land on whatever the coroutine will actually use.
+        foreach ($this->getExtenders($alias) as $extender) {
+            $instance = $extender($instance, $this);
         }
 
-        // Fire resolving/afterResolving callbacks so that adapters registered via
-        // afterResolving() (e.g. registerSessionAdapter) work for scoped services too.
-        // Without this, parent::resolve() is bypassed and callbacks never fire.
+        $this->seedScopedInstance($alias, $instance);
+
+        // A sibling coroutine of the same scope may have got here first while this one
+        // was suspended inside the factory. Its instance is already the one the context
+        // hands out, so this one is dropped rather than fought over.
+        $winner = $ctx->find($ctxKey);
+
+        if ($winner !== null) {
+            return $winner;
+        }
+
+        // The instance goes into the context before the callbacks run, the way the
+        // container publishes to $instances before firing them: a callback is free to
+        // resolve the same alias again, and it has to reach this object rather than
+        // build a second one and collide on the context key.
+        //
+        // Except at the root, where find() would reach it from every request that ever
+        // follows — the sharing this whole mechanism exists to prevent. A resolve from
+        // there gets its object and nobody inherits it.
+        if ($ctx !== root_context()) {
+            $ctx->set($ctxKey, $instance);
+        }
+
+        // Adapters registered via afterResolving() (e.g. registerSessionAdapter) have to
+        // fire here too: parent::resolve() is bypassed for scoped services, and it is the
+        // only other place that fires them.
         $this->fireResolvingCallbacks($alias, $instance);
 
-        $ctx->set($ctxKey, $instance);
-
         return $instance;
+    }
+
+    /**
+     * In async mode an object is never kept in step with the current request.
+     *
+     * refresh() exists for an object that outlives the request it was built for; a
+     * coroutine has none. What it leaves behind is real damage: the subscription goes
+     * into the shared container, so it survives its coroutine, is invoked on every
+     * later request, and holds its target — a guard, and the user inside it — alive
+     * forever. Upstream registers one for every guard it builds.
+     *
+     * Only refresh() is refused. rebinding() still works, because the framework uses
+     * it for objects that genuinely are shared and do have to follow the request,
+     * the URL generator among them.
+     */
+    public function refresh($abstract, $target, $method)
+    {
+        if (! $this->asyncMode) {
+            return parent::refresh($abstract, $target, $method);
+        }
+
+        // rebinding() answers with the instance only when there is one to answer with,
+        // and callers do use the return value.
+        return $this->bound($abstract) ? $this->make($abstract) : null;
+    }
+
+    /**
+     * Hand the boot-time configuration of a scoped service to the instance this
+     * coroutine has just built, if the service registered a way to transfer it.
+     */
+    private function seedScopedInstance(string $alias, object $instance): void
+    {
+        $seeder    = $this->scopedSeeders[$alias] ?? null;
+        $prototype = $this->scopedPrototypes[$alias] ?? null;
+
+        if ($seeder === null || $prototype === null) {
+            return;
+        }
+
+        $seeder($instance, $prototype);
+    }
+
+    /**
+     * Remember what bootstrap left in the container for every scoped alias.
+     *
+     * Only instances that are already resolved are taken. Resolving one here would
+     * happen with async mode switched on, which stores it in the root context — where
+     * find() reaches it from every coroutine and the sharing we are undoing comes back.
+     */
+    private function captureScopedPrototypes(): void
+    {
+        foreach ($this->scopedAliases() as $alias) {
+            // Never a second time: extend() keeps the template up to date while serving,
+            // and re-reading the container instance would undo that.
+            if (isset($this->instances[$alias]) && ! isset($this->scopedPrototypes[$alias])) {
+                $this->scopedPrototypes[$alias] = $this->instances[$alias];
+            }
+        }
+    }
+
+    /**
+     * Report async mode being switched on with providers registered but not booted.
+     *
+     * Unconditional, unlike the diagnostics below: every boot-time registration made
+     * from that point on is lost, the loss is silent, and by the time anything shows
+     * it looks like the registration was never written. The HTTP kernel stands in for
+     * "this is a real application": a bare container assembled by a test has no
+     * providers of its own to lose.
+     */
+    private function reportPrematureAsyncMode(): void
+    {
+        if ($this->isBooted() || ! $this->bound(HttpKernel::class)) {
+            return;
+        }
+
+        error_log(
+            '[async] async mode was enabled before the application booted: providers configure '
+            .'objects no coroutine inherits, so their boot-time registrations are lost'
+        );
+    }
+
+    /**
+     * Warn about configuration that bootstrap made and no coroutine will inherit.
+     *
+     * The failure is invisible at runtime: the service resolves, behaves like a freshly
+     * constructed one, and fails much later wherever the lost registration was supposed
+     * to be used.
+     */
+    private function reportScopedServiceRisks(): void
+    {
+        foreach (array_keys($this->scopedPrototypes) as $alias) {
+            // The package's own scoped services are built by factories that configure
+            // them in full; warning about those would be crying wolf on every start.
+            if (ScopedService::tryFrom($alias) !== null) {
+                continue;
+            }
+
+            if (isset($this->scopedSeeders[$alias]) || isset($this->scopedBindings[$alias])) {
+                continue;
+            }
+
+            error_log(
+                "[async] scoped service '{$alias}' was configured during bootstrap but has no "
+                .'scopedSeeder()/scopedSingleton(); coroutines will get an unconfigured instance'
+            );
+        }
+    }
+
+    /**
+     * Whether this alias gets a fresh instance per coroutine.
+     *
+     * Fills the config-declared half of the answer on first use, because extend() can
+     * run long before async mode is switched on and the cache is built.
+     */
+    private function isScopedAlias(string $alias): bool
+    {
+        return $this->perRequestKey($alias) !== null;
+    }
+
+    /**
+     * The context key this alias is stored under, or null if it is not per-request.
+     *
+     * One hash lookup answers both questions, because this runs on every resolve the
+     * application makes — the check used to cost more than the work it guarded.
+     *
+     * The map is kept current rather than snapshotted: Laravel appends to its own
+     * scoped list while running (a deferred provider calling scoped(), the #[Scoped]
+     * attribute discovered on first resolve), and a service that becomes per-request
+     * after startup must not stay shared.
+     */
+    private function perRequestKey(string $alias): ScopedService|string|null
+    {
+        if (count($this->scopedInstances) !== $this->scopedInstancesSeen) {
+            $this->absorbScopedInstances();
+        }
+
+        if (isset($this->perRequestKeys[$alias])) {
+            return $this->perRequestKeys[$alias];
+        }
+
+        // Reading the config resolves a service, which asks this question again. The
+        // guard is on re-entry rather than on "already loaded", so an empty answer from
+        // a config that was not merged yet is retried instead of latched.
+        if ($this->scopedServiceCache === [] && ! $this->readingScopedConfig && $this->resolved('config')) {
+            $this->readingScopedConfig = true;
+
+            try {
+                $this->cacheConfiguredScopedServices($this->make('config')->get('async.scoped_services', []));
+            } finally {
+                $this->readingScopedConfig = false;
+            }
+
+            return $this->perRequestKeys[$alias] ?? null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Take in whatever Laravel has added to its own scoped list since the last look.
+     */
+    private function absorbScopedInstances(): void
+    {
+        $this->scopedInstancesSeen = count($this->scopedInstances);
+
+        foreach ($this->scopedInstances as $scoped) {
+            // scoped() also accepts a closure, whose return types name the services;
+            // those are left out rather than guessed at, and stay shared.
+            if (is_string($scoped)) {
+                $this->markPerRequest($scoped);
+            }
+        }
+    }
+
+    /**
+     * Declare an alias per-request, under the context key it will be stored with.
+     */
+    private function markPerRequest(string $abstract): void
+    {
+        $alias = $this->getAlias($abstract);
+
+        $this->perRequestKeys[$alias] ??= ScopedService::tryFrom($alias) ?? $alias;
+    }
+
+    /**
+     * @return string[] every alias this container treats as scoped
+     */
+    private function scopedAliases(): array
+    {
+        $this->absorbScopedInstances();
+
+        return array_keys($this->perRequestKeys);
     }
 }

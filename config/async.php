@@ -19,6 +19,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Startup Diagnostics
+    |--------------------------------------------------------------------------
+    |
+    | Report scoped services that bootstrap configured but no coroutine will
+    | inherit — a service whose provider called extend() or a setter on the
+    | resolved object, with no scopedSeeder() to carry that over. Such a service
+    | resolves happily and then behaves as if it had never been configured, so
+    | turn this on when a driver, macro or handler registered at boot appears to
+    | vanish under the async server.
+    |
+    */
+
+    'diagnostics' => false,
+
+    /*
+    |--------------------------------------------------------------------------
     | Database Connection Pool
     |--------------------------------------------------------------------------
     |
