@@ -17,6 +17,7 @@ class AsyncServiceProvider extends ServiceProvider
         $this->registerRouterAdapter();
         $this->registerTranslatorAdapter();
         $this->registerSessionAdapter();
+        $this->registerAuthAdapter();
         $this->registerDatabaseAdapter();
         $this->registerPermissionAdapter();
         $this->registerInertiaAdapter();
@@ -54,6 +55,26 @@ class AsyncServiceProvider extends ServiceProvider
             \Fruitcake\LaravelDebugbar\LaravelDebugbar::class,
             fn ($debugbar, $app) => new \Spawn\Laravel\Debugbar\AsyncDebugbar($app, $app['request']),
         );
+    }
+
+    private function registerAuthAdapter(): void
+    {
+        // Bootstrap has to configure our subclass, not the stock manager: an
+        // application registers its guards on the object (Auth::extend(),
+        // Auth::viaRequest()), and only the subclass can tell a coroutine what
+        // those registrations were.
+        $this->app->singleton('auth', fn ($app) => new \Spawn\Laravel\Auth\AsyncAuthManager($app));
+
+        if (! $this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+            return;
+        }
+
+        $this->app->scopedSeeder('auth', function (object $coroutineManager, object $bootManager): void {
+            if ($coroutineManager instanceof \Illuminate\Auth\AuthManager
+                && $bootManager instanceof \Illuminate\Auth\AuthManager) {
+                \Spawn\Laravel\Auth\AsyncAuthManager::seedInto($coroutineManager, $bootManager);
+            }
+        });
     }
 
     private function registerPermissionAdapter(): void
@@ -106,6 +127,13 @@ class AsyncServiceProvider extends ServiceProvider
             $this->app->scopedSingleton(
                 \Laravel\Socialite\Contracts\Factory::class,
                 fn ($app) => new \Laravel\Socialite\SocialiteManager($app),
+            );
+
+            // Socialite::extend('gitlab', ...) in a provider's boot() is the documented
+            // way to add a provider it does not ship with.
+            $this->app->scopedSeeder(
+                \Laravel\Socialite\Contracts\Factory::class,
+                \Spawn\Laravel\Foundation\ManagerRegistrations::seed(...),
             );
         }
     }
@@ -187,6 +215,26 @@ class AsyncServiceProvider extends ServiceProvider
                 return new \Spawn\Laravel\Session\AsyncDatabaseSessionHandler($conn, $table, $lifetime, $app);
             });
         });
+
+        if (! $this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+            return;
+        }
+
+        // StartSession is a singleton that takes the manager in its constructor, so the
+        // first coroutine through the pipeline would decide whose session every later
+        // request reads and writes — including which session cookie it leaves with.
+        $this->app->scoped(
+            \Illuminate\Session\Middleware\StartSession::class,
+            fn ($app) => new \Illuminate\Session\Middleware\StartSession(
+                $app->make(\Illuminate\Session\SessionManager::class),
+                fn () => $app->make(\Illuminate\Contracts\Cache\Factory::class),
+            ),
+        );
+
+        // A custom session handler is registered on the manager during boot
+        // (Session::extend('mongo', ...)), so a coroutine building its own manager
+        // would report the driver as unsupported.
+        $this->app->scopedSeeder('session', \Spawn\Laravel\Foundation\ManagerRegistrations::seed(...));
     }
 
     private function registerTelescopeAdapter(): void
