@@ -54,8 +54,23 @@ class WorkerInitializationTest extends AsyncTestCase
             $this->assertTrue($options[PDO::ATTR_POOL_ENABLED], "{$name} must be pooled");
             $this->assertSame(3, $options[PDO::ATTR_POOL_MIN]);
             $this->assertSame(7, $options[PDO::ATTR_POOL_MAX]);
-            $this->assertSame(15, $options[PDO::ATTR_POOL_HEALTHCHECK_INTERVAL]);
+            /* The config is in seconds, the attribute in milliseconds. */
+            $this->assertSame(15_000, $options[PDO::ATTR_POOL_HEALTHCHECK_INTERVAL]);
         }
+    }
+
+    public function test_initialization_falls_back_to_the_documented_pool_defaults(): void
+    {
+        $app = $this->appWithDatabase();
+        $app->make('config')->set('async.db_pool', ['enabled' => true]);
+
+        TrueAsyncServer::initializeApp($app);
+
+        $options = $app->make('config')->get('database.connections.mysql.options');
+
+        $this->assertSame(2, $options[PDO::ATTR_POOL_MIN]);
+        $this->assertSame(10, $options[PDO::ATTR_POOL_MAX]);
+        $this->assertSame(30_000, $options[PDO::ATTR_POOL_HEALTHCHECK_INTERVAL]);
     }
 
     public function test_a_disabled_pool_does_not_stop_the_rest_of_the_initialization(): void

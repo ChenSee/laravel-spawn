@@ -32,7 +32,8 @@ trait ManagesDatabasePool
                         \PDO::ATTR_POOL_ENABLED              => true,
                         \PDO::ATTR_POOL_MIN                  => $poolConfig['min'] ?? 2,
                         \PDO::ATTR_POOL_MAX                  => $poolConfig['max'] ?? 10,
-                        \PDO::ATTR_POOL_HEALTHCHECK_INTERVAL => $poolConfig['healthcheck_interval'] ?? 30,
+                        // The attribute is in milliseconds, the config in seconds.
+                        \PDO::ATTR_POOL_HEALTHCHECK_INTERVAL => (int) (($poolConfig['healthcheck_interval'] ?? 30) * 1000),
                     ]
                 )
             );
