@@ -194,11 +194,13 @@ fails identically on `master`.
 ### `LOCK_EX` from five coroutines stops the worker
 
 `file_put_contents($path, $data, FILE_APPEND | LOCK_EX)` from five or more coroutines at
-once ends the process's useful life: the first write lands, no other call returns, and
-nothing else is served either. Four at once always finish. Measured on 2026-08-12 against
-`true_async_server` built from `/home/edmond/true-async-server` on PHP 8.6.0-dev ZTS DEBUG,
-with a twelve-line script that spawns N coroutines and writes one line from each — no
-Laravel involved, so this belongs to the runtime rather than to this package.
+once ends the process's useful life: nothing is written, no call returns, and nothing else
+is served either. Four at once always finish. The threshold is `UV_THREADPOOL_SIZE`, which
+defaults to 4: `flock()` is offloaded to the libuv pool and a waiting task holds its
+thread, so with every thread parked in `flock()` nothing is left to run the work that
+would release the lock. Filed as
+[true-async/php-async#221](https://github.com/true-async/php-async/issues/221), with a
+twenty-line reproduction that needs no Laravel and no server extension.
 
 **It reaches an application through the shipped defaults.** `Filesystem::put($path, $data,
 true)` passes `LOCK_EX`, and both `FileSessionHandler::write()` and `FileStore::put()` call
