@@ -71,6 +71,14 @@ class AsyncViewFactory extends Factory
      */
     private BladeRenderState $processState;
 
+    /**
+     * The context the last render state came from, held so that its object handle cannot
+     * be handed to another context, and the state that belongs to it.
+     */
+    private ?\Async\Context $memoContext = null;
+
+    private ?BladeRenderState $memoState = null;
+
     public function __construct(EngineResolver $engines, ViewFinderInterface $finder, Dispatcher $events)
     {
         $this->processState = new BladeRenderState();
@@ -158,6 +166,17 @@ class AsyncViewFactory extends Factory
 
     /**
      * The render state of the request being served, or the process-wide one.
+     *
+     * Every read and write of the sixteen moved properties arrives here, which a
+     * `@foreach` does on every iteration, so the answer for the last context is kept.
+     * At 500 rows a page the lookup cost 225 of the 785 microseconds a render took, and
+     * 98 of 668 with the answer kept: 15 per cent off the render
+     * (tests/bench/bench_render.php, release build, median of eleven runs).
+     *
+     * Keeping the context object is what makes comparing it by identity safe. PHP hands
+     * a freed object's handle to the next one, so a context released between requests
+     * could otherwise come back as the same `===` and answer request B with the state of
+     * request A; a context this factory still holds is never freed.
      */
     private function renderState(): BladeRenderState
     {
@@ -166,6 +185,10 @@ class AsyncViewFactory extends Factory
         }
 
         $context = RequestContext::current();
+
+        if ($context === $this->memoContext) {
+            return $this->memoState;
+        }
 
         if ($context === root_context()) {
             return $this->processState;
@@ -178,6 +201,9 @@ class AsyncViewFactory extends Factory
 
             $context->set(self::RENDER_STATE_KEY, $state);
         }
+
+        $this->memoContext = $context;
+        $this->memoState   = $state;
 
         return $state;
     }

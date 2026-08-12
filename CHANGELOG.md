@@ -13,6 +13,7 @@
 - Facade roots the container does not register were rebuilt on every call once async mode switched facade caching off (#30): Laravel registers neither `Illuminate\Http\Client\Factory` nor `Illuminate\Process\Factory`, so `Http::globalMiddleware()` from a provider and `Process::preventStrayProcesses()` configured an object nobody read again. Async mode now registers such a root as a singleton
 
 ### Changed
+- `AsyncViewFactory` keeps the render state of the context it last saw, so a `@foreach` stops asking the context on every property access. 785 → 668 microseconds per render at 500 rows a page, of which the lookup was 225 before and 98 after (`tests/bench/bench_render.php`, release build, median of eleven runs). The context object is kept alongside the state, which is what makes comparing by identity safe: PHP hands a freed object's handle to the next one
 - `perRequestKey()` stops re-reading `config('async.scoped_services')` once async mode is on. With the shipped default of an empty list the read fired on every resolve that was not per-request, which is most of the hundreds a request makes
 
 ### Added
