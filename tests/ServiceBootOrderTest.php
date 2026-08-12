@@ -7,7 +7,6 @@ use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Routing\Router;
 use Illuminate\Support\Facades\Facade;
-use PHPUnit\Framework\TestCase;
 use Spawn\Laravel\AsyncServiceProvider;
 use Spawn\Laravel\Config\AsyncConfig;
 use Spawn\Laravel\Database\AsyncMySqlConnection;
@@ -26,7 +25,7 @@ use Spawn\Laravel\View\AsyncViewFactory;
  * Boots a near-real Laravel application and asserts that every adapted service
  * is the async-safe class, including internal dependencies injected via constructor.
  */
-class ServiceBootOrderTest extends TestCase
+class ServiceBootOrderTest extends AsyncTestCase
 {
     protected function tearDown(): void
     {

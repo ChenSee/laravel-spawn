@@ -9,6 +9,7 @@
 - Boot-time log context did not reach requests (#33) — Laravel's own `scoped()` already gives each request its own `Log\Context\Repository`, but a fresh one starts empty, so a deployment id added at boot vanished from every log line. A seeder copies it in
 - Terminating callbacks accumulated and re-ran (#34) — `$app->terminating()` from a controller or middleware appended to a list the container never emptied, so the side effect ran again at the end of every later request, N times on the Nth. The list belongs to the request now; the container keeps only what bootstrap registered
 - `Vite` held the CSP nonce and the preloaded assets of whichever request wrote last (#35) — a page could go out under another request's nonce, and the `Link: rel=preload` header grew on every response for ever. Each request gets a clone of the boot-time object with the render state empty
+- Facade roots the container does not register were rebuilt on every call once async mode switched facade caching off (#30): Laravel registers neither `Illuminate\Http\Client\Factory` nor `Illuminate\Process\Factory`, so `Http::globalMiddleware()` from a provider and `Process::preventStrayProcesses()` configured an object nobody read again. Async mode now registers such a root as a singleton
 
 ### Changed
 - `perRequestKey()` stops re-reading `config('async.scoped_services')` once async mode is on. With the shipped default of an empty list the read fired on every resolve that was not per-request, which is most of the hundreds a request makes

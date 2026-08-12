@@ -146,6 +146,8 @@ class AsyncApplication extends Application
             $this->proxyFacade($alias);
         }
 
+        $this->shareFacadeRoots();
+
         if ($config !== null && $config->get('async.diagnostics', false)) {
             $this->reportScopedServiceRisks();
             $this->reportPerRequestCaptures();
@@ -895,6 +897,38 @@ class AsyncApplication extends Application
     private function proxyFacade(string $alias): void
     {
         FacadeCache::put($alias, new ScopedServiceProxy(fn () => $this->make($alias)));
+    }
+
+    /**
+     * Let the container own the facade roots nobody registered.
+     *
+     * With the facade cache off a facade asks the container on every call, which is what
+     * makes a per-request alias answer per coroutine. A root the container does not know
+     * is rebuilt on every call as well, and whatever was set on it is lost with the
+     * previous object: Laravel registers neither `Illuminate\Http\Client\Factory` nor
+     * `Illuminate\Process\Factory`, yet both keep their global middleware, their fakes and
+     * their stray-call guard on the instance. Registering them makes the container answer
+     * what caching used to answer, one root per worker, and lifetime is decided there for
+     * everything else already.
+     *
+     * The registration is lazy, so a root nobody uses is never built, and a root that
+     * cannot be built still fails at first use rather than at start-up. Per-request
+     * aliases, roots the container already knows and keys that are not class names are
+     * left alone; a key like `view` belongs to a provider that is simply absent, and
+     * inventing a binding for it would answer `bound()` for code that asks whether the
+     * provider is there.
+     */
+    private function shareFacadeRoots(): void
+    {
+        foreach (FacadeRoots::accessors() as $accessor) {
+            $alias = $this->getAlias($accessor);
+
+            if ($this->bound($alias) || $this->isScopedAlias($alias) || ! class_exists($accessor)) {
+                continue;
+            }
+
+            $this->singleton($accessor);
+        }
     }
 
     /**

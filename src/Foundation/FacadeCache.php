@@ -44,6 +44,18 @@ final class FacadeCache extends Facade
     }
 
     /**
+     * Let facades remember what they resolve again.
+     *
+     * A worker never leaves async mode, so nothing in the server calls this. A test
+     * process runs one application after another in the same PHP process, and the
+     * application that switched caching off is gone by the time the next one starts.
+     */
+    public static function resumeCaching(): void
+    {
+        static::$cached = true;
+    }
+
+    /**
      * Whether the answer waiting for this facade is one of ours.
      *
      * False both when the entry is missing and when something else put a concrete

@@ -4,7 +4,6 @@ namespace Spawn\Laravel\Tests;
 
 use Illuminate\Config\Repository;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
-use PHPUnit\Framework\TestCase;
 use Spawn\Laravel\Foundation\AsyncApplication;
 
 /**
@@ -15,7 +14,7 @@ use Spawn\Laravel\Foundation\AsyncApplication;
  * error_log ini setting, that is where the message lands. Nothing else about them is
  * — they carry no return value and throw nothing — so the log is the contract.
  */
-class AsyncDiagnosticsTest extends TestCase
+class AsyncDiagnosticsTest extends AsyncTestCase
 {
     /**
      * Everything error_log() emits while the callback runs.
