@@ -42,7 +42,7 @@ final class WorkerBootstrap
      */
     private static function completeBoot(Application $app): void
     {
-        if (($view = $app->make('view')) instanceof \Spawn\Laravel\View\AsyncViewFactory) {
+        if ($app->bound('view') && ($view = $app->make('view')) instanceof \Spawn\Laravel\View\AsyncViewFactory) {
             $view->bootCompleted();
         }
 
@@ -62,19 +62,21 @@ final class WorkerBootstrap
             }
         }
 
-        if (($translator = $app->make('translator')) instanceof \Spawn\Laravel\Translation\AsyncTranslator) {
+        if ($app->bound('translator')
+            && ($translator = $app->make('translator')) instanceof \Spawn\Laravel\Translation\AsyncTranslator) {
             $translator->bootCompleted();
         }
 
-        if (($config = $app->make('config')) instanceof \Spawn\Laravel\Config\AsyncConfig) {
+        if ($app->bound('config') && ($config = $app->make('config')) instanceof \Spawn\Laravel\Config\AsyncConfig) {
             $config->bootCompleted();
         }
 
-        if (($events = $app->make('events')) instanceof \Spawn\Laravel\Events\AsyncDispatcher) {
+        if ($app->bound('events')
+            && ($events = $app->make('events')) instanceof \Spawn\Laravel\Events\AsyncDispatcher) {
             $events->bootCompleted();
         }
 
-        if (($router = $app->make('router')) instanceof \Spawn\Laravel\Routing\AsyncRouter) {
+        if ($app->bound('router') && ($router = $app->make('router')) instanceof \Spawn\Laravel\Routing\AsyncRouter) {
             $router->bootCompleted();
         }
 
@@ -109,7 +111,8 @@ final class WorkerBootstrap
                         \PDO::ATTR_POOL_ENABLED              => true,
                         \PDO::ATTR_POOL_MIN                  => $pool['min'] ?? 2,
                         \PDO::ATTR_POOL_MAX                  => $pool['max'] ?? 10,
-                        \PDO::ATTR_POOL_HEALTHCHECK_INTERVAL => $pool['healthcheck_interval'] ?? 30,
+                        // The attribute is in milliseconds, the config in seconds.
+                        \PDO::ATTR_POOL_HEALTHCHECK_INTERVAL => (int) (($pool['healthcheck_interval'] ?? 30) * 1000),
                     ]
                 )
             );

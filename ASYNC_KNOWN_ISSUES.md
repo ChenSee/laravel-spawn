@@ -10,8 +10,9 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 
 ## 0. Where things stand
 
-- Work is on `fix/24-scoped-boot-registrations`, open as **PR #29** against `master`.
-  182 tests, green, end-to-end included.
+- Work is on `fix/24-scoped-boot-registrations`, which carries this change on top of
+  `master`; the branch's earlier work went in as PR #29 and the branch was rebuilt after
+  that merge. 199 tests, green, end-to-end included.
 - **Issues #30 to #35 are fixed** (table in §1), each with a test that fails without the
   fix.
 - Of the strategy in §6: moves 4 and 6 are done, move 3 is half done and its two

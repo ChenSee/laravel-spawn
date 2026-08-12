@@ -6,6 +6,14 @@ parameters:
     ignoreErrors:
         - identifier: new.static
         - identifier: ignore.unmatchedLine
+        # For $attempts >= 1 transaction() leaves its retry loop only by returning or by
+        # rethrowing from one of the handlers, so the tail after the loop is unreachable.
+        # PHPStan does not follow that through handleTransactionException() and asks for
+        # a return. Laravel's own transaction() returns null for $attempts <= 0 too.
+        -
+            message: '#^Method .+::(transaction|coroutineTransaction)\(\) should return TReturn but return statement is missing\.$#'
+            identifier: return.missing
+            path: src/Database/CoroutineTransactions.php
 
 rules:
     - Spawn\Laravel\PHPStan\MutableStaticPropertyRule
