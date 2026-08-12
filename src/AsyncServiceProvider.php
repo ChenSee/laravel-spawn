@@ -346,18 +346,6 @@ class AsyncServiceProvider extends ServiceProvider
 
     private function registerViewAdapter(): void
     {
-        $build = function ($app) {
-            $factory = new \Spawn\Laravel\View\AsyncViewFactory(
-                $app['view.engine.resolver'],
-                $app['view.finder'],
-                $app['events'],
-            );
-            $factory->setContainer($app);
-            $factory->share('app', $app);
-
-            return $factory;
-        };
-
         // Replace the stock View Factory with our async-safe version.
         // ViewServiceProvider is never deferred, so a simple singleton() rebinding
         // works — AsyncServiceProvider always registers after ViewServiceProvider
@@ -367,7 +355,18 @@ class AsyncServiceProvider extends ServiceProvider
         // Component::$factory caches it in a static, and MailManager and Markdown keep it
         // in their constructors. What is per-request is the state it writes — see
         // AsyncViewFactory.
-        $this->app->singleton('view', $build);
+        $this->app->singleton('view', function ($app) {
+            $factory = new \Spawn\Laravel\View\AsyncViewFactory(
+                $app['view.engine.resolver'],
+                $app['view.finder'],
+                $app['events'],
+            );
+
+            $factory->setContainer($app);
+            $factory->share('app', $app);
+
+            return $factory;
+        });
     }
 
     private function registerLogContextAdapter(): void

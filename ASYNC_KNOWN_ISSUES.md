@@ -146,6 +146,13 @@ visibly; where none is named, nothing will notice the change but a reader.
    is for the proxy rather than for the slot being occupied. A test harness that clears
    the whole array has to enable async mode again, or its facades go back to pinning the
    first coroutine's instance.
+9. **`Cookie::shouldReceive()` in async mode mocks the proxy, not the service.**
+   `Facade::getMockableClass()` returns `get_class(static::getFacadeRoot())`, and the root
+   of a per-request facade is a `ScopedServiceProxy`, so the mock carries that class and
+   satisfies no type-hint the real service would. It reaches tests only: a worker is the
+   only thing that turns async mode on, and `artisan test` does not. Not pinned by a
+   test — Mockery is not installed here, and pulling it in for this alone is not worth a
+   dependency.
 
 ---
 
