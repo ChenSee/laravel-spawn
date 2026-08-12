@@ -185,6 +185,15 @@ and an explicit `instance()` outranks scoping.
 - **Pool mode (`workers > 1`)** cannot be stopped from the parent (upstream
   true-async/server#117), so a test would leave a process behind. The failure mode it
   would catch is static state, which the two-applications-in-one-process test covers.
+- **Whether `TrueAsyncServer` should warm the PDO pool.** `DevServer` calls
+  `warmUpDatabasePool()` from inside its server coroutine, `FrankenPhpServer` documents why
+  it must not — before the scheduler runs, warming hangs — and `TrueAsyncServer` calls it
+  nowhere, so its pool is created lazily in whichever request coroutine touches the database
+  first. `ManagesDatabasePool` says such a pool is scoped to a short-lived coroutine and
+  destroyed between requests; the changelog says a worker must warm it. Which side
+  `TrueAsyncServer`'s bootloader falls on is unestablished: it runs in the worker thread
+  before `HttpServer::start()`, and telling a warm-up from a hang there needs a database and
+  concurrent requests. There is no database on this machine.
 - **Object lifetime** — "a guard does not outlive its request" — is unobservable:
   `runParallel()` never disposes its scopes, so a `WeakReference` stays alive on any
   branch. Accumulation is asserted through the container's own counters instead.

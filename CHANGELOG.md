@@ -10,6 +10,7 @@
 - Terminating callbacks accumulated and re-ran (#34), N times on the Nth request. The list belongs to the request now
 - `Vite` held the CSP nonce and the preloaded assets of whichever request wrote last (#35). Each request gets a clone of the boot-time object with the render state empty
 - The adapters kept per-request state in the coroutine's own context while the container used the request's, so a nested `Scope::inherit()` wrote its config overlay, locale, route, Inertia state and Telescope buffer where nothing would read them. All of them answer through `RequestContext::current()`
+- `RestorePerRequestFacades` never reached a kernel that an application provider resolved in its own `register()`: `afterResolving()` fires on a build, and the container answers a resolved singleton without building one. The provider now prepends to a kernel that is already there
 - Facade roots the container does not register were rebuilt on every call once async mode switched facade caching off (#30), so `Http::globalMiddleware()` and `Process::preventStrayProcesses()` configured an object nobody read again. Async mode registers such a root as a singleton
 
 ### Changed

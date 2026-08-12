@@ -46,13 +46,24 @@ class AsyncServiceProvider extends ServiceProvider
             __DIR__ . '/../config/async.php' => config_path('async.php'),
         ], 'async-config');
 
-        // afterResolving rather than a resolve here: an artisan process has no reason to
-        // build the HTTP kernel, and the servers build it on their first request.
-        $this->app->afterResolving(\Illuminate\Contracts\Http\Kernel::class, function ($kernel): void {
+        $prepend = static function ($kernel): void {
             if (method_exists($kernel, 'prependMiddleware')) {
                 $kernel->prependMiddleware(\Spawn\Laravel\Http\Middleware\RestorePerRequestFacades::class);
             }
-        });
+        };
+
+        // afterResolving rather than a resolve here: an artisan process has no reason to
+        // build the HTTP kernel, and the servers build it on their first request.
+        $this->app->afterResolving(\Illuminate\Contracts\Http\Kernel::class, $prepend);
+
+        // The callback fires on a build, and the container answers a resolved singleton
+        // without building one. register() forgets a kernel resolved before this provider,
+        // but a provider registered after it can resolve one in its own register(), which
+        // is over before any boot() runs. prependMiddleware() ignores a repeat, so a kernel
+        // both paths reach gets the middleware once.
+        if ($this->app->resolved(\Illuminate\Contracts\Http\Kernel::class)) {
+            $prepend($this->app->make(\Illuminate\Contracts\Http\Kernel::class));
+        }
     }
 
     private function registerDebugbarAdapter(): void

@@ -132,4 +132,52 @@ class ServiceBootOrderTest extends AsyncTestCase
         $this->assertInstanceOf(AsyncDispatcher::class, Model::getEventDispatcher(),
             'Model::$dispatcher must be AsyncDispatcher after boot');
     }
+
+    /**
+     * The middleware that puts back the per-request facade entries reaches a kernel that
+     * was already resolved when this provider booted.
+     *
+     * `afterResolving()` fires on a build, and the container answers a resolved singleton
+     * without building one. `register()` forgets a kernel resolved before AsyncServiceProvider
+     * ran; a provider registered after it can resolve one in its own `register()`, and every
+     * `register()` is over before the first `boot()`.
+     */
+    public function test_the_facade_middleware_reaches_a_kernel_resolved_during_register(): void
+    {
+        $app = new AsyncApplication(sys_get_temp_dir());
+
+        $app->instance('config', new \Illuminate\Config\Repository([
+            'async' => ['scoped_services' => [], 'db_pool' => ['enabled' => false]],
+        ]));
+        $app->instance('files', new \Illuminate\Filesystem\Filesystem());
+        $app->singleton(\Illuminate\Contracts\Http\Kernel::class, PlainKernel::class);
+
+        Facade::setFacadeApplication($app);
+        Facade::clearResolvedInstances();
+
+        $app->register(\Illuminate\Events\EventServiceProvider::class);
+        $app->register(\Illuminate\Routing\RoutingServiceProvider::class);
+        $app->register(AsyncServiceProvider::class);
+        $app->register(ResolvesKernelWhileRegistering::class);
+
+        $app->boot();
+
+        $kernel     = $app->make(\Illuminate\Contracts\Http\Kernel::class);
+        $middleware = (new \ReflectionProperty($kernel, 'middleware'))->getValue($kernel);
+
+        $this->assertContains(\Spawn\Laravel\Http\Middleware\RestorePerRequestFacades::class, $middleware);
+        $this->assertCount(1, array_keys($middleware, \Spawn\Laravel\Http\Middleware\RestorePerRequestFacades::class));
+    }
+}
+
+/**
+ * An application provider that needs the kernel while registering — to read its middleware
+ * groups, to push its own, or to hand it to something else.
+ */
+class ResolvesKernelWhileRegistering extends \Illuminate\Support\ServiceProvider
+{
+    public function register(): void
+    {
+        $this->app->make(\Illuminate\Contracts\Http\Kernel::class);
+    }
 }
