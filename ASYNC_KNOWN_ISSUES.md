@@ -12,7 +12,7 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 
 - Work is on `fix/24-scoped-boot-registrations`, which carries this change on top of
   `master`; the branch's earlier work went in as PR #29 and the branch was rebuilt after
-  that merge. 204 tests, green, end-to-end included.
+  that merge. 206 tests, green, end-to-end included.
 - **Issues #30 to #35 are fixed** (table in §1), each with a test that fails without the
   fix.
 - Of the strategy in §6: moves 3, 4 and 6 are done, move 5 was rejected in the shape the
@@ -27,8 +27,8 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 
 1. The container contract gaps (§3) — only after the shape in §6.1 has a concurrency
    harness behind it.
-2. §2 lists what the design cannot do. Each is pinned by a test; removing one needs a
-   different design rather than a fix.
+2. §2 lists what the design cannot do. Removing one needs a different design rather than
+   a fix; three of the eight are not pinned by a test and say so.
 
 ### Working notes, so a cold start does not repeat today
 
@@ -63,13 +63,16 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 - `Async\suspend()` is what makes an interleaving test deterministic. Two coroutines that
   never suspend run one after the other, and a test written without it passes on shared
   state as happily as on isolated state.
-- **A load stand is not the same as the suite.** Sixty concurrent requests against a real
-  `async:serve`, each carrying its own token through Blade, the cookie jar, `Vite`, the
-  log context and a terminating callback, found a leak every unit test had missed: the
-  request facade after a suspension point. Everything else held. Worth rebuilding before
-  claiming a facade or a render is isolated — the recipe is one route that writes a token
-  into each of them, `Async\delay()` in the middle, and a checker that fails the response
-  carrying somebody else's token.
+- **A load stand is not the same as the suite, and it proves less than a clean run
+  suggests.** Sixty concurrent requests against a real `async:serve`, each carrying its own
+  token through Blade, the cookie jar, `Vite`, the log context and a terminating callback,
+  found a leak every unit test had missed: the request facade after a suspension point.
+  Nothing else came back mixed — but the stand's only suspension was *before* the render,
+  so the renders ran atomically and it could not have distinguished shared Blade state
+  from isolated. A stand that tests the render needs the suspension **inside** it: a view
+  composer that yields within an `@include`, a component with a slot, `@once` in two
+  includes. It also has to read what it collects — the terminating-callback log was
+  written by the route and never checked by the script.
 
 ---
 
@@ -77,8 +80,8 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 
 | # | What | Fix | Test |
 |---|---|---|---|
-| [#30](https://github.com/YanGusik/laravel-spawn/issues/30) | Facades of scoped services pin the first coroutine's instance (`Cookie`, `Socialite`, `Request`) | A `ScopedServiceProxy` in the facade cache for every per-request alias, and caching switched off so that an entry the framework removes is never refilled with one coroutine's object | `CookieIsolationTest`, `FacadeRestoreTest` |
-| [#31](https://github.com/YanGusik/laravel-spawn/issues/31) | Blade render state (`@section`, `@push`, components) is shared | The factory stays one object and its sixteen render properties move into the request's context, so unmodified framework code writes per request | `BladeRenderE2ETest`, `BladeRenderIsolationTest`, `ViewRenderStateTest` |
+| [#30](https://github.com/YanGusik/laravel-spawn/issues/30) | Facades of scoped services pin the first coroutine's instance (`Cookie`, `Socialite`, `Request`) | Caching switched off with async mode, so a facade always asks the container and the container answers per coroutine; a `ScopedServiceProxy` per per-request alias on top, as the fast path | `CookieIsolationTest`, `FacadeRestoreTest` |
+| [#31](https://github.com/YanGusik/laravel-spawn/issues/31) | Blade render state (`@section`, `@push`, components) is shared | The factory stays one object and its sixteen render properties move into the request's context, so unmodified framework code writes per request. Tests cover sections, `@push`, `@once` and a suspended `@include`; `<x-component>` and slots go through the same properties but are not driven by a test | `BladeRenderE2ETest`, `BladeRenderIsolationTest`, `ViewRenderStateTest` |
 | [#32](https://github.com/YanGusik/laravel-spawn/issues/32) | `UrlGenerator` is shared and overwritten per request | `url` and the response factory are per-request; `rebinding()` inside a per-request factory is dropped instead of accumulating | `UrlIsolationTest` |
 | [#33](https://github.com/YanGusik/laravel-spawn/issues/33) | Laravel's own `scoped()` singletons were never flushed | Container half in #29; a seeder now carries boot-time log context into each request | `RequestLifecycleIsolationTest` |
 | [#34](https://github.com/YanGusik/laravel-spawn/issues/34) | Terminating callbacks accumulate and re-run | The list belongs to the request, in its context; the container keeps only what bootstrap registered | `RequestLifecycleIsolationTest` |
@@ -103,33 +106,39 @@ than any single fix here.**
 
 ## 2. Limitations inside the design, pinned by tests
 
-These are consequences of how scoping works, not oversights. Each has a test asserting
-the current behaviour, so a future change that removes the limitation fails visibly.
+These are consequences of how scoping works, not oversights. Where a test asserts the
+current behaviour it is named, and a future change that removes the limitation fails
+visibly; where none is named, nothing will notice the change but a reader.
 
 1. **`use`-captured state in an adopted registration.** Re-binding fixes `$this` and
    nothing else. A creator written as `Auth::extend('x', function () use ($manager) {…})`
    keeps resolving against the manager it captured, in every coroutine.
-   `tests/AuthLimitationsTest.php` asserts the broken behaviour and says so.
+   `tests/AuthLimitationsTest.php` asserts the broken behaviour, and the re-bound form
+   beside it, so the difference between the two is visible.
    Registrations made through `Auth::resolved()` — the form real Sanctum uses — are
    correctly isolated, because `afterResolving` runs after the seeder.
-2. **A registration made after serving begins reaches one coroutine.** Prototypes are
+2. **The configured list of per-request services is read for the last time at
+   `enableAsyncMode()`.** A deferred provider that merges its own entries into
+   `async.scoped_services` while serving is never seen; before the latch it was, at the
+   cost of a config read on every resolve that missed. Not pinned by a test.
+3. **A registration made after serving begins reaches one coroutine.** Prototypes are
    captured once, at `enableAsyncMode()`. A deferred provider loaded inside a request is
    the usual way to hit this: it is marked loaded and never registers again.
-3. **`scopedSingleton()` services have no prototype**, so a seeder for one never runs —
+4. **`scopedSingleton()` services have no prototype**, so a seeder for one never runs —
    there is no boot-time instance by definition.
-4. **A seeder only runs for an alias the container treats as scoped.** On any other
+5. **A seeder only runs for an alias the container treats as scoped.** On any other
    alias it is silently never called.
-5. **A facade of an alias that becomes per-request after start-up** is proxied from the
+6. **A facade of an alias that becomes per-request after start-up** is proxied from the
    moment the container learns of it, not from the moment the facade first resolved. An
    instance the facade cached before that — a deferred provider calling `scoped()` on an
    alias a facade had already touched — stays until something overwrites it.
-6. **A facade root of a per-request alias answers `__call`, `__get`, `__set` and
+7. **A facade root of a per-request alias answers `__call`, `__get`, `__set` and
    `__isset`, and nothing else.** `ScopedServiceProxy` is not callable, not stringable,
    not countable and not traversable, so `(Vite::getFacadeRoot())(…)` or `count(Foo::…)`
    through such a facade fails. Nothing in the per-request set is used that way — the
    `@vite` directive resolves through the container, not the facade — and the methods can
    be added when something needs them.
-7. **`Facade::clearResolvedInstances()` while serving removes the proxies.** Nothing in
+8. **`Facade::clearResolvedInstances()` while serving removes the proxies.** Nothing in
    the package calls it after start-up. The singular `clearResolvedInstance('request')`,
    which `Illuminate\Foundation\Http\Kernel` calls on every request, is put back by
    `RestorePerRequestFacades`, the first middleware in the pipeline — including when a

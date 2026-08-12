@@ -13,9 +13,10 @@ use Symfony\Component\HttpFoundation\Response;
  *
  * `Kernel::sendRequestThroughRouter()` calls `Request::clearResolvedInstance()` after
  * binding the new request, which deletes the entry that makes the request facade answer
- * per coroutine. From there the first coroutine to call `Request::` caches its own
- * request in a static array the whole process reads. Running first in the pipeline is
- * the earliest point after the removal, and nothing between the two touches a facade.
+ * per coroutine through a proxy. Correctness does not depend on this: with facade caching
+ * off, a facade whose entry is gone asks the container on every call. What this restores
+ * is the fast path — one array read for a per-request facade instead of a container
+ * resolve — and running first in the pipeline is the earliest point after the removal.
  *
  * Prepended by `AsyncServiceProvider` when the HTTP kernel is resolved. Applications do
  * not register it and should not have to.

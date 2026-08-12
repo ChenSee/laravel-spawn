@@ -317,7 +317,7 @@ class AsyncApplication extends Application
     /**
      * The context every per-request object of this request lives in.
      *
-     * The request scope is the one the server assigns per connection and every
+     * The request scope is the one the server assigns per request and every
      * coroutine of that request inherits, so a nested Scope::inherit() inside a
      * handler shares one auth manager and one session with the handler that spawned
      * it. current_context() is the scope's own, which would give the nested coroutine
@@ -903,9 +903,12 @@ class AsyncApplication extends Application
      * `Illuminate\Foundation\Http\Kernel::sendRequestThroughRouter()` calls
      * `Request::clearResolvedInstance()` before the pipeline runs, so from that point the
      * request facade has no per-coroutine entry and the next coroutine to touch it caches
-     * its own request for every other coroutine to read. Restoring the entries is the
-     * whole fix; the earliest place after the removal is the first middleware, which is
-     * why {@see \Spawn\Laravel\Http\Middleware\RestorePerRequestFacades} exists.
+     * its own request for every other coroutine to read. What makes that harmless is
+     * FacadeCache::stopCaching(): with the cache off, a facade whose entry is gone asks
+     * the container on every call and the container answers per coroutine. Restoring the
+     * entry is the fast path on top — one array read instead of a resolve — and the
+     * earliest place to do it is the first middleware, which is why
+     * {@see \Spawn\Laravel\Http\Middleware\RestorePerRequestFacades} exists.
      *
      * Entries already in place are left alone, so this costs one hash lookup per
      * per-request alias and no allocation in the normal case.
