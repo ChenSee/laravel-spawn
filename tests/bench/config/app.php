@@ -17,6 +17,8 @@ return [
         Illuminate\Log\LogServiceProvider::class,
         Illuminate\Translation\TranslationServiceProvider::class,
         Illuminate\Routing\RoutingServiceProvider::class,
+        Illuminate\Cookie\CookieServiceProvider::class,
+        Illuminate\Log\Context\ContextServiceProvider::class,
         Spawn\Laravel\AsyncServiceProvider::class,
     ],
     'aliases' => [],

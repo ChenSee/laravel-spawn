@@ -191,6 +191,24 @@ the image loads `true_async_server` but has no `trueasync_response()`, which
 `src/Sse/Sse.php:19` calls. CI uses `:latest`, where it exists. Not a code defect, and it
 fails identically on `master`.
 
+### `LOCK_EX` from five coroutines stops the worker
+
+`file_put_contents($path, $data, FILE_APPEND | LOCK_EX)` from five or more coroutines at
+once ends the process's useful life: the first write lands, no other call returns, and
+nothing else is served either. Four at once always finish. Measured on 2026-08-12 against
+`true_async_server` built from `/home/edmond/true-async-server` on PHP 8.6.0-dev ZTS DEBUG,
+with a twelve-line script that spawns N coroutines and writes one line from each — no
+Laravel involved, so this belongs to the runtime rather than to this package.
+
+**It reaches an application through the shipped defaults.** `Filesystem::put($path, $data,
+true)` passes `LOCK_EX`, and both `FileSessionHandler::write()` and `FileStore::put()` call
+it that way, so a worker on `SESSION_DRIVER=file` or `CACHE_STORE=file` stops under five
+concurrent writes. Read from the framework source, not reproduced through a server. Log
+channels are safe: `single` and `daily` default to `'locking' => false`.
+
+The render-load stand appends without a lock for this reason, and one short append per
+request is atomic on Linux anyway.
+
 ---
 
 ## 6. Strategy

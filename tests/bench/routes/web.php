@@ -74,6 +74,37 @@ $router->get('/request-scope', function () {
     ]);
 });
 
+// Render-load probe (RenderLoadE2ETest, TrueAsyncServer only): one request writes its
+// token into every path a page collects state in, and the render suspends in the middle
+// of a section — a composer on load.partials.aside yields, which is where a real render
+// hands the coroutine over. A stand whose only suspension is before the render proves
+// nothing about Blade: the renders run atomically and shared state looks isolated.
+//
+// The terminating callback is checked as well as the response, because it runs after the
+// body is built and reads the log context, which nothing in the body would show.
+app('view')->composer('load.partials.aside', fn () => \Async\suspend());
+
+$router->get('/render-load', function (Illuminate\Http\Request $request) {
+    $token = (string) $request->query('token', 'none');
+    $log   = dirname(__DIR__) . '/storage/render-load.log';
+
+    Illuminate\Support\Facades\Context::add('token', $token);
+    Illuminate\Support\Facades\Cookie::queue('probe', $token, 0, null, null, false, false);
+
+    app()->terminating(function () use ($token, $log) {
+        $seen = Illuminate\Support\Facades\Context::get('token');
+
+        // No LOCK_EX: five coroutines waiting on flock stop this build of the runtime
+        // (ASYNC_KNOWN_ISSUES.md §5). One short append is atomic on Linux without it.
+        file_put_contents($log, $token . ':' . $seen . "\n", FILE_APPEND);
+    });
+
+    return response()->view('load.page', [
+        'token' => $token,
+        'url'   => url()->full(),
+    ]);
+});
+
 // SSE probe (StreamingE2ETest, TrueAsyncServer only): writes directly to the
 // raw HttpResponse and closes it, so TrueAsyncServer::sendResponse() must skip
 // the buffered path entirely once isClosed() is true.
