@@ -50,7 +50,13 @@ class AuditCapturesCommand extends Command
 
         $this->line(sprintf('Driving %d URL(s) through a worker.', count($urls)));
 
-        $found = (new CaptureSweep($app, $app->make(HttpKernel::class)))->over($urls);
+        $kernel = $app->make(HttpKernel::class);
+
+        $sweep = new CaptureSweep($app, function ($request) use ($kernel): void {
+            $kernel->terminate($request, $kernel->handle($request));
+        });
+
+        $found = $sweep->over($urls);
 
         if ($found === []) {
             $this->info('No shared service holds a per-request object.');

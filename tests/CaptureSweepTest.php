@@ -2,12 +2,12 @@
 
 namespace Spawn\Laravel\Tests;
 
+use Closure;
 use Illuminate\Config\Repository;
-use Illuminate\Contracts\Foundation\Application;
-use Illuminate\Contracts\Http\Kernel as HttpKernel;
-use Illuminate\Http\Response;
 use Spawn\Laravel\Foundation\AsyncApplication;
 use Spawn\Laravel\Foundation\CaptureSweep;
+use Spawn\Laravel\Tests\Fixtures\CapturingMiddleware;
+use Spawn\Laravel\Tests\Fixtures\SelfContainedMiddleware;
 
 /**
  * What the sweep is for: a capture that only exists once a request has been served.
@@ -33,38 +33,15 @@ class CaptureSweepTest extends AsyncTestCase
     }
 
     /**
-     * A kernel that does one thing per request: resolve whatever it was given.
+     * A request handler that does one thing: resolve what it was told to.
+     *
+     * @return Closure(mixed): void
      */
-    private function kernelResolving(AsyncApplication $app, string ...$aliases): HttpKernel
+    private function resolving(AsyncApplication $app, string ...$aliases): Closure
     {
-        return new class ($app, $aliases) implements HttpKernel {
-            /**
-             * @param  string[]  $aliases
-             */
-            public function __construct(private readonly AsyncApplication $app, private readonly array $aliases)
-            {
-            }
-
-            public function bootstrap(): void
-            {
-            }
-
-            public function handle($request)
-            {
-                foreach ($this->aliases as $alias) {
-                    $this->app->make($alias);
-                }
-
-                return new Response();
-            }
-
-            public function terminate($request, $response): void
-            {
-            }
-
-            public function getApplication(): Application
-            {
-                return $this->app;
+        return function () use ($app, $aliases): void {
+            foreach ($aliases as $alias) {
+                $app->make($alias);
             }
         };
     }
@@ -74,13 +51,9 @@ class CaptureSweepTest extends AsyncTestCase
         $app = $this->bootedApp();
 
         /* The StartSession shape: a singleton keeping the per-request service. */
-        $app->singleton('middleware', fn ($app) => new class ($app->make('widgets')) {
-            public function __construct(public object $captured)
-            {
-            }
-        });
+        $app->singleton('middleware', fn ($app) => new CapturingMiddleware($app->make('widgets')));
 
-        $found = (new CaptureSweep($app, $this->kernelResolving($app, 'middleware')))->over(['/orders']);
+        $found = (new CaptureSweep($app, $this->resolving($app, 'middleware')))->over(['/orders']);
 
         $this->assertCount(1, $found);
         $this->assertSame(
@@ -93,13 +66,9 @@ class CaptureSweepTest extends AsyncTestCase
     {
         $app = $this->bootedApp();
 
-        $app->singleton('middleware', fn () => new class (new \stdClass()) {
-            public function __construct(public object $ownCollaborator)
-            {
-            }
-        });
+        $app->singleton('middleware', fn () => new SelfContainedMiddleware(new \stdClass()));
 
-        $found = (new CaptureSweep($app, $this->kernelResolving($app, 'middleware')))->over(['/orders']);
+        $found = (new CaptureSweep($app, $this->resolving($app, 'middleware')))->over(['/orders']);
 
         $this->assertSame([], $found);
     }
@@ -108,13 +77,9 @@ class CaptureSweepTest extends AsyncTestCase
     {
         $app = $this->bootedApp();
 
-        $app->singleton('middleware', fn ($app) => new class ($app->make('widgets')) {
-            public function __construct(public object $captured)
-            {
-            }
-        });
+        $app->singleton('middleware', fn ($app) => new CapturingMiddleware($app->make('widgets')));
 
-        $found = (new CaptureSweep($app, $this->kernelResolving($app, 'middleware')))->over(['/first', '/second']);
+        $found = (new CaptureSweep($app, $this->resolving($app, 'middleware')))->over(['/first', '/second']);
 
         $this->assertCount(1, $found);
         $this->assertSame('/first', reset($found)['url']);
@@ -124,11 +89,7 @@ class CaptureSweepTest extends AsyncTestCase
     {
         $app = $this->bootedApp();
 
-        $app->singleton('middleware', fn ($app) => new class ($app->make('widgets')) {
-            public function __construct(public object $captured)
-            {
-            }
-        });
+        $app->singleton('middleware', fn ($app) => new CapturingMiddleware($app->make('widgets')));
 
         $this->assertSame(
             [],

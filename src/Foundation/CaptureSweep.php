@@ -3,7 +3,7 @@
 namespace Spawn\Laravel\Foundation;
 
 use Async\Scope;
-use Illuminate\Contracts\Http\Kernel as HttpKernel;
+use Closure;
 use Illuminate\Http\Request;
 
 use function Async\current_context;
@@ -24,9 +24,13 @@ final class CaptureSweep
 {
     private const TIMEOUT_MS = 30_000;
 
+    /**
+     * @param  Closure(Request): mixed  $serve  hands the request to the application and
+     *   returns when the response is done, the way a server's request handler does
+     */
     public function __construct(
         private readonly AsyncApplication $app,
-        private readonly HttpKernel $kernel,
+        private readonly Closure $serve,
     ) {
     }
 
@@ -69,13 +73,11 @@ final class CaptureSweep
 
             current_context()->set(ScopedService::REQUEST, $request);
 
-            $response = $this->kernel->handle($request);
+            ($this->serve)($request);
 
             // While the scope is alive: the request's own services live in its context,
             // and they are half of what the audit compares against.
             $captures = $this->app->perRequestCaptures();
-
-            $this->kernel->terminate($request, $response);
         });
 
         $scope->awaitCompletion(\Async\timeout(self::TIMEOUT_MS));
