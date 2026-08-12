@@ -3,17 +3,16 @@
 namespace Spawn\Laravel\Events;
 
 use Illuminate\Events\Dispatcher;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
  * Coroutine-safe Event Dispatcher.
  *
  * Before bootCompleted(): behaves like stock Dispatcher.
- * After bootCompleted(): defer() state is stored per-coroutine in current_context().
+ * After bootCompleted(): defer() state is stored per request in RequestContext.
  *
  * The listener registry ($listeners, $wildcards, $wildcardsCache) remains shared —
- * listeners are the same for all requests, only defer state differs per coroutine.
+ * listeners are the same for all requests, only defer state differs per request.
  */
 class AsyncDispatcher extends Dispatcher
 {
@@ -32,7 +31,7 @@ class AsyncDispatcher extends Dispatcher
             return parent::defer($callback, $events);
         }
 
-        $ctx = current_context();
+        $ctx = RequestContext::current();
         $prev = $ctx->find(self::CTX_KEY);
 
         $ctx->set(self::CTX_KEY, [
@@ -60,7 +59,7 @@ class AsyncDispatcher extends Dispatcher
     public function dispatch($event, $payload = [], $halt = false)
     {
         if ($this->async && $this->shouldDeferForContext($event)) {
-            $ctx = current_context();
+            $ctx = RequestContext::current();
             $state = $ctx->find(self::CTX_KEY);
             $state['deferred'][] = func_get_args();
             $ctx->set(self::CTX_KEY, $state, replace: true);
@@ -72,7 +71,7 @@ class AsyncDispatcher extends Dispatcher
 
     private function shouldDeferForContext($event): bool
     {
-        $state = current_context()->find(self::CTX_KEY);
+        $state = RequestContext::current()->find(self::CTX_KEY);
 
         if (! $state || ! $state['deferring']) {
             return false;

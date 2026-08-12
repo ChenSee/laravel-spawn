@@ -4,8 +4,7 @@ namespace Spawn\Laravel\Routing;
 
 use Illuminate\Http\Request;
 use Illuminate\Routing\Router;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
  * Coroutine-safe Router.
@@ -28,7 +27,7 @@ class AsyncRouter extends Router
         if ($this->container instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
             $this->container->scopedSingleton(
                 \Illuminate\Routing\Route::class,
-                fn () => current_context()->find(self::CTX_CURRENT_ROUTE),
+                fn () => RequestContext::current()->find(self::CTX_CURRENT_ROUTE),
             );
         }
     }
@@ -36,7 +35,7 @@ class AsyncRouter extends Router
     public function dispatch(Request $request)
     {
         if ($this->async) {
-            $ctx = current_context();
+            $ctx = RequestContext::current();
             $ctx->set(self::CTX_CURRENT_REQUEST, $request);
         } else {
             $this->currentRequest = $request;
@@ -57,7 +56,7 @@ class AsyncRouter extends Router
              * own copy before anything can yield. */
             $route = clone $route;
 
-            current_context()->set(self::CTX_CURRENT_ROUTE, $route);
+            RequestContext::current()->set(self::CTX_CURRENT_ROUTE, $route);
         } else {
             $this->current = $route;
         }
@@ -76,7 +75,7 @@ class AsyncRouter extends Router
     public function current()
     {
         if ($this->async) {
-            return current_context()->find(self::CTX_CURRENT_ROUTE);
+            return RequestContext::current()->find(self::CTX_CURRENT_ROUTE);
         }
 
         return $this->current;
@@ -85,7 +84,7 @@ class AsyncRouter extends Router
     public function getCurrentRequest()
     {
         if ($this->async) {
-            return current_context()->find(self::CTX_CURRENT_REQUEST);
+            return RequestContext::current()->find(self::CTX_CURRENT_REQUEST);
         }
 
         return $this->currentRequest;

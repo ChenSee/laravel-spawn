@@ -6,6 +6,7 @@ use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Http\Kernel;
 use Spawn\Laravel\Async\RawIo;
 use Spawn\Laravel\Contracts\ServerInterface;
+use Spawn\Laravel\Foundation\RequestContext;
 use Spawn\Laravel\Foundation\ScopedService;
 use Spawn\Laravel\Foundation\WorkerBootstrap;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
@@ -16,8 +17,6 @@ use TrueAsync\HttpResponse;
 use TrueAsync\StaticHandler;
 use TrueAsync\StaticOnMissing;
 use Illuminate\Http\Request;
-use function Async\current_context;
-use function Async\request_context;
 use function Async\spawn;
 
 class TrueAsyncServer implements ServerInterface
@@ -59,7 +58,7 @@ class TrueAsyncServer implements ServerInterface
                 $request = $this->convertRequest($taRequest);
 
                 RawIo::set($taRequest, $taResponse);
-                request_context()->set(ScopedService::REQUEST, $request);
+                RequestContext::current()->set(ScopedService::REQUEST, $request);
 
                 if ($telescopeEnabled) {
                     \Laravel\Telescope\Telescope::startRecording(false);

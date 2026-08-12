@@ -7,8 +7,6 @@ use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Foundation\Application;
 
 use function Async\coroutine_context;
-use function Async\current_context;
-use function Async\request_context;
 use function Async\root_context;
 
 class AsyncApplication extends Application
@@ -317,26 +315,12 @@ class AsyncApplication extends Application
     }
 
     /**
-     * The context every per-request object of this request lives in.
-     *
-     * The request scope is the one the server assigns per request and every
-     * coroutine of that request inherits, so a nested Scope::inherit() inside a
-     * handler shares one auth manager and one session with the handler that spawned
-     * it. current_context() is the scope's own, which would give the nested coroutine
-     * a second set of everything — and, at the root, one set shared by all requests.
-     */
-    private function scopeContext(): \Async\Context
-    {
-        return request_context() ?? current_context();
-    }
-
-    /**
      * Resolve the current request from context, instances, or fallback.
      */
     private function resolveRequest(): \Illuminate\Http\Request
     {
         if ($this->asyncMode) {
-            $fromContext = $this->scopeContext()->find(ScopedService::REQUEST);
+            $fromContext = RequestContext::current()->find(ScopedService::REQUEST);
             if ($fromContext !== null) {
                 return $fromContext;
             }
@@ -364,7 +348,7 @@ class AsyncApplication extends Application
             return $this->instances[$alias];
         }
 
-        $ctx = $this->scopeContext();
+        $ctx = RequestContext::current();
         $ctxKey = $key;
 
         $instance = $ctx->find($ctxKey);
@@ -498,11 +482,11 @@ class AsyncApplication extends Application
      * Whether a per-request factory is running above this call, in this coroutine.
      *
      * The depth is kept in coroutine_context(), which belongs to one coroutine and is
-     * inherited by nobody — unlike current_context(), which belongs to the scope and is
-     * shared by every coroutine of the request. Either a property of the container or
-     * the scope's context would let one coroutine answer this question for another the
-     * moment a factory suspends mid-build. Only the build path pays for it: a service
-     * already in the context never gets here.
+     * inherited by nobody, unlike the request's context, which every coroutine of the
+     * request shares. Either a property of the container or the request's context would
+     * let one coroutine answer this question for another the moment a factory suspends
+     * mid-build. Only the build path pays for it: a service already in the context never
+     * gets here.
      */
     private function buildingScoped(): bool
     {
@@ -577,7 +561,7 @@ class AsyncApplication extends Application
             }
         }
 
-        $this->scopeContext()->unset(self::TERMINATING);
+        RequestContext::current()->unset(self::TERMINATING);
     }
 
     /**
@@ -589,7 +573,7 @@ class AsyncApplication extends Application
             return null;
         }
 
-        $context = $this->scopeContext();
+        $context = RequestContext::current();
 
         if ($context === root_context()) {
             return null;
@@ -755,7 +739,7 @@ class AsyncApplication extends Application
      */
     private function perRequestIdentity(): array
     {
-        $context  = $this->scopeContext();
+        $context  = RequestContext::current();
         $identity = [];
 
         foreach ($this->scopedAliases() as $alias) {

@@ -6,9 +6,8 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\View\Engines\EngineResolver;
 use Illuminate\View\Factory;
 use Illuminate\View\ViewFinderInterface;
+use Spawn\Laravel\Foundation\RequestContext;
 
-use function Async\current_context;
-use function Async\request_context;
 use function Async\root_context;
 
 /**
@@ -128,7 +127,7 @@ class AsyncViewFactory extends Factory
 
         $keys = is_array($key) ? $key : [$key => $value];
 
-        $ctx = $this->scopeContext();
+        $ctx = RequestContext::current();
         $shared = $ctx->find(self::CTX_KEY);
 
         if ($shared === null) {
@@ -152,7 +151,7 @@ class AsyncViewFactory extends Factory
             return parent::getShared();
         }
 
-        $perRequest = $this->scopeContext()->find(self::CTX_KEY) ?? [];
+        $perRequest = RequestContext::current()->find(self::CTX_KEY) ?? [];
 
         return array_merge($this->shared, $perRequest);
     }
@@ -166,7 +165,7 @@ class AsyncViewFactory extends Factory
             return $this->processState;
         }
 
-        $context = $this->scopeContext();
+        $context = RequestContext::current();
 
         if ($context === root_context()) {
             return $this->processState;
@@ -181,16 +180,5 @@ class AsyncViewFactory extends Factory
         }
 
         return $state;
-    }
-
-    /**
-     * The context every per-request object of this request lives in.
-     *
-     * The same choice the container makes: the request scope, so a coroutine spawned
-     * inside a handler renders into the same sections as the handler that spawned it.
-     */
-    private function scopeContext(): \Async\Context
-    {
-        return request_context() ?? current_context();
     }
 }

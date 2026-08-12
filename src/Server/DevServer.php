@@ -8,10 +8,10 @@ use Async\Scope;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Http\Kernel;
 use Spawn\Laravel\Contracts\ServerInterface;
+use Spawn\Laravel\Foundation\RequestContext;
 use Spawn\Laravel\Foundation\ScopedService;
 use Spawn\Laravel\Server\Concerns\ManagesDatabasePool;
 
-use function Async\current_context;
 use function Async\spawn;
 
 class DevServer implements ServerInterface
@@ -107,7 +107,7 @@ class DevServer implements ServerInterface
 
             $request = RequestParser::parse($raw, $remoteAddr);
 
-            current_context()->set(ScopedService::REQUEST, $request);
+            RequestContext::current()->set(ScopedService::REQUEST, $request);
 
             \Spawn\Laravel\Debugbar\ResetDebugbar::handle($this->app, $request);
 

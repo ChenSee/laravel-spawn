@@ -7,11 +7,10 @@ use Countable;
 use IteratorAggregate;
 use Traversable;
 use ArrayIterator;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
- * Array-like object that stores data per-coroutine via current_context().
+ * Array-like object that stores data per request via RequestContext.
  *
  * Drop-in replacement for a static array property on a singleton/static class.
  * Supports: $arr[] = $val, count($arr), empty($arr), foreach($arr), collect($arr).
@@ -24,7 +23,7 @@ class ContextArray implements ArrayAccess, Countable, IteratorAggregate
 
     private function &items(): array
     {
-        $ctx = current_context();
+        $ctx = RequestContext::current();
         $items = $ctx->find($this->contextKey);
 
         if ($items === null) {
@@ -37,7 +36,7 @@ class ContextArray implements ArrayAccess, Countable, IteratorAggregate
 
     private function setItems(array $items): void
     {
-        current_context()->set($this->contextKey, $items, replace: true);
+        RequestContext::current()->set($this->contextKey, $items, replace: true);
     }
 
     public function offsetExists(mixed $offset): bool

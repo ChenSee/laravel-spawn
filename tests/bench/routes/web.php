@@ -48,10 +48,18 @@ $router->get('/boom', function () {
 // is null and the probe proves nothing.
 $router->get('/request-scope', function () {
     $inner = null;
+    $token = uniqid('probe', true);
 
     $nested = \Async\Scope::inherit();
-    $nested->spawn(function () use (&$inner) {
+    $nested->spawn(function () use (&$inner, $token) {
         $inner = spl_object_id(app('redirect'));
+
+        // The adapters keep their per-request state in the context the container uses,
+        // so a write here reaches the handler that spawned this coroutine. Under the
+        // scope's own context it would not: a context reaches its parents, never its
+        // children.
+        config(['spawn.probe' => $token]);
+        app()->setLocale('zz');
     });
     $nested->awaitCompletion(\Async\timeout(2000));
 
@@ -60,6 +68,8 @@ $router->get('/request-scope', function () {
     return response()->json([
         'request_scope' => \Async\request_context() !== null,
         'shared'        => $inner === $outer,
+        'config_shared' => config('spawn.probe') === $token,
+        'locale_shared' => app()->getLocale() === 'zz',
         'id'            => $outer,
     ]);
 });

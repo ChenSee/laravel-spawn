@@ -3,17 +3,16 @@
 namespace Spawn\Laravel\Translation;
 
 use Illuminate\Translation\Translator;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
  * Coroutine-safe Translator.
  *
  * Before bootCompleted(): behaves like stock Translator.
- * After bootCompleted(): $locale is stored per-coroutine in current_context().
+ * After bootCompleted(): $locale is stored per request in RequestContext.
  *
  * The $loaded translations cache remains shared — translations are the same
- * for all requests, only the active locale differs per coroutine.
+ * for all requests, only the active locale differs per request.
  */
 class AsyncTranslator extends Translator
 {
@@ -40,7 +39,7 @@ class AsyncTranslator extends Translator
             throw new \InvalidArgumentException('Invalid characters present in locale.');
         }
 
-        current_context()->set(self::CTX_KEY, $locale, replace: true);
+        RequestContext::current()->set(self::CTX_KEY, $locale, replace: true);
     }
 
     public function getLocale()
@@ -49,7 +48,7 @@ class AsyncTranslator extends Translator
             return parent::getLocale();
         }
 
-        return current_context()->find(self::CTX_KEY) ?? $this->bootLocale;
+        return RequestContext::current()->find(self::CTX_KEY) ?? $this->bootLocale;
     }
 
     public function locale()

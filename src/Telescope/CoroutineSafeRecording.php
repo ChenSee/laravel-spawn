@@ -16,14 +16,13 @@ use Laravel\Telescope\IncomingEntry;
 use Laravel\Telescope\EntryUpdate;
 use Laravel\Telescope\Jobs\ProcessPendingUpdates;
 use Throwable;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
  * Coroutine-safe overrides for Telescope's recording pipeline.
  *
  * Replaces static $entriesQueue, $updatesQueue, $shouldRecord
- * with per-coroutine storage via current_context().
+ * with per-request storage via RequestContext.
  *
  * Apply this trait to a class that replaces Laravel\Telescope\Telescope
  * via composer exclude-from-classmap.
@@ -64,7 +63,7 @@ trait CoroutineSafeRecording
         $shouldRecord = ! $recordingPaused;
 
         if (static::$asyncMode) {
-            current_context()->set(self::CTX_RECORDING, $shouldRecord, replace: true);
+            RequestContext::current()->set(self::CTX_RECORDING, $shouldRecord, replace: true);
         } else {
             static::$shouldRecord = $shouldRecord;
         }
@@ -76,7 +75,7 @@ trait CoroutineSafeRecording
     public static function stopRecording()
     {
         if (static::$asyncMode) {
-            current_context()->set(self::CTX_RECORDING, false, replace: true);
+            RequestContext::current()->set(self::CTX_RECORDING, false, replace: true);
         } else {
             static::$shouldRecord = false;
         }
@@ -88,7 +87,7 @@ trait CoroutineSafeRecording
     public static function withoutRecording($callback)
     {
         if (static::$asyncMode) {
-            $ctx = current_context();
+            $ctx = RequestContext::current();
             $prev = $ctx->find(self::CTX_RECORDING) ?? false;
             $ctx->set(self::CTX_RECORDING, false, replace: true);
 
@@ -115,7 +114,7 @@ trait CoroutineSafeRecording
     public static function isRecording()
     {
         $recording = static::$asyncMode
-            ? (current_context()->find(self::CTX_RECORDING) ?? false)
+            ? (RequestContext::current()->find(self::CTX_RECORDING) ?? false)
             : static::$shouldRecord;
 
         return $recording && ! app('events') instanceof EventFake;
@@ -145,7 +144,7 @@ trait CoroutineSafeRecording
         static::withoutRecording(function () use ($entry) {
             if (collect(static::$filterUsing)->every->__invoke($entry)) {
                 if (static::$asyncMode) {
-                    $ctx = current_context();
+                    $ctx = RequestContext::current();
                     $entries = $ctx->find(self::CTX_ENTRIES) ?? [];
                     $entries[] = $entry;
                     $ctx->set(self::CTX_ENTRIES, $entries, replace: true);
@@ -170,7 +169,7 @@ trait CoroutineSafeRecording
         }
 
         if (static::$asyncMode) {
-            $ctx = current_context();
+            $ctx = RequestContext::current();
             $updates = $ctx->find(self::CTX_UPDATES) ?? [];
             $updates[] = $update;
             $ctx->set(self::CTX_UPDATES, $updates, replace: true);
@@ -185,7 +184,7 @@ trait CoroutineSafeRecording
     public static function flushEntries()
     {
         if (static::$asyncMode) {
-            current_context()->set(self::CTX_ENTRIES, [], replace: true);
+            RequestContext::current()->set(self::CTX_ENTRIES, [], replace: true);
         } else {
             static::$entriesQueue = [];
         }
@@ -207,7 +206,7 @@ trait CoroutineSafeRecording
 
     private static function storeAsync(EntriesRepository $storage): void
     {
-        $ctx = current_context();
+        $ctx = RequestContext::current();
         $entries = $ctx->find(self::CTX_ENTRIES) ?? [];
         $updates = $ctx->find(self::CTX_UPDATES) ?? [];
 

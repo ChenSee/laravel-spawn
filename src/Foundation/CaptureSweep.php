@@ -6,8 +6,6 @@ use Async\Scope;
 use Closure;
 use Illuminate\Http\Request;
 
-use function Async\current_context;
-
 /**
  * Drives requests through a worker and collects what each one leaves captured.
  *
@@ -71,7 +69,7 @@ final class CaptureSweep
         $scope->spawn(function () use ($url, &$captures): void {
             $request = Request::create($url, 'GET');
 
-            current_context()->set(ScopedService::REQUEST, $request);
+            RequestContext::current()->set(ScopedService::REQUEST, $request);
 
             ($this->serve)($request);
 
