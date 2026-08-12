@@ -88,6 +88,28 @@ class FacadeRestoreTest extends AsyncTestCase
     }
 
     /**
+     * Restoring the entry is not enough on its own. The kernel clears it once per
+     * request, so with requests overlapping there is always a coroutine whose entry has
+     * just been cleared by somebody else's; whatever it resolves in that window would be
+     * cached for every other coroutine to read. Found on a server under 60 concurrent
+     * requests, where 59 of 60 responses reported another request's URL.
+     */
+    public function test_a_facade_resolved_while_its_entry_is_missing_caches_nothing(): void
+    {
+        $app = $this->bootedApp();
+
+        RequestFacade::clearResolvedInstance();
+
+        $seen = $this->runParallel([
+            'first'  => fn () => $this->pathSeenBy($app, '/first'),
+            'second' => fn () => $this->pathSeenBy($app, '/second'),
+        ]);
+
+        $this->assertSame('first', $seen['first']);
+        $this->assertSame('second', $seen['second'], 'one request read another request\'s URL');
+    }
+
+    /**
      * The window the kernel opens is not empty. Between the removal and the middleware
      * the framework runs its bootstrappers, which suspend on the first request, so a
      * concurrent coroutine can resolve the facade and leave its own request in the slot.

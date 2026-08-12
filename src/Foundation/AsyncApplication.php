@@ -140,6 +140,8 @@ class AsyncApplication extends Application
         $this->captureScopedPrototypes();
         $this->reportPrematureAsyncMode();
 
+        FacadeCache::stopCaching();
+
         foreach ($this->scopedAliases() as $alias) {
             $this->proxyFacade($alias);
         }

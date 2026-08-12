@@ -26,6 +26,24 @@ final class FacadeCache extends Facade
     }
 
     /**
+     * Stop facades from remembering what they resolve.
+     *
+     * A proxy in the cache answers per coroutine, but the framework empties entries while
+     * serving — `Kernel::sendRequestThroughRouter()` drops `request` on every request —
+     * and whatever coroutine resolves the facade next would otherwise leave its own object
+     * there for every other coroutine to read. With caching off that window closes: a
+     * facade whose entry is gone asks the container on every call, and the container
+     * answers per coroutine.
+     *
+     * The proxies stay and still answer first, so a per-request facade costs one array
+     * lookup rather than a resolve.
+     */
+    public static function stopCaching(): void
+    {
+        static::$cached = false;
+    }
+
+    /**
      * Whether the answer waiting for this facade is one of ours.
      *
      * False both when the entry is missing and when something else put a concrete

@@ -12,7 +12,7 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 
 - Work is on `fix/24-scoped-boot-registrations`, which carries this change on top of
   `master`; the branch's earlier work went in as PR #29 and the branch was rebuilt after
-  that merge. 203 tests, green, end-to-end included.
+  that merge. 204 tests, green, end-to-end included.
 - **Issues #30 to #35 are fixed** (table in §1), each with a test that fails without the
   fix.
 - Of the strategy in §6: moves 3, 4 and 6 are done, move 5 was rejected in the shape the
@@ -63,6 +63,13 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 - `Async\suspend()` is what makes an interleaving test deterministic. Two coroutines that
   never suspend run one after the other, and a test written without it passes on shared
   state as happily as on isolated state.
+- **A load stand is not the same as the suite.** Sixty concurrent requests against a real
+  `async:serve`, each carrying its own token through Blade, the cookie jar, `Vite`, the
+  log context and a terminating callback, found a leak every unit test had missed: the
+  request facade after a suspension point. Everything else held. Worth rebuilding before
+  claiming a facade or a render is isolated — the recipe is one route that writes a token
+  into each of them, `Async\delay()` in the middle, and a checker that fails the response
+  carrying somebody else's token.
 
 ---
 
@@ -70,7 +77,7 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 
 | # | What | Fix | Test |
 |---|---|---|---|
-| [#30](https://github.com/YanGusik/laravel-spawn/issues/30) | Facades of scoped services pin the first coroutine's instance (`Cookie`, `Socialite`, `Request`) | Every per-request alias gets a `ScopedServiceProxy` written straight into the facade cache, so no list of facade names is needed and no proxy reaches a typed parameter | `CookieIsolationTest` |
+| [#30](https://github.com/YanGusik/laravel-spawn/issues/30) | Facades of scoped services pin the first coroutine's instance (`Cookie`, `Socialite`, `Request`) | A `ScopedServiceProxy` in the facade cache for every per-request alias, and caching switched off so that an entry the framework removes is never refilled with one coroutine's object | `CookieIsolationTest`, `FacadeRestoreTest` |
 | [#31](https://github.com/YanGusik/laravel-spawn/issues/31) | Blade render state (`@section`, `@push`, components) is shared | The factory stays one object and its sixteen render properties move into the request's context, so unmodified framework code writes per request | `BladeRenderE2ETest`, `BladeRenderIsolationTest`, `ViewRenderStateTest` |
 | [#32](https://github.com/YanGusik/laravel-spawn/issues/32) | `UrlGenerator` is shared and overwritten per request | `url` and the response factory are per-request; `rebinding()` inside a per-request factory is dropped instead of accumulating | `UrlIsolationTest` |
 | [#33](https://github.com/YanGusik/laravel-spawn/issues/33) | Laravel's own `scoped()` singletons were never flushed | Container half in #29; a seeder now carries boot-time log context into each request | `RequestLifecycleIsolationTest` |
