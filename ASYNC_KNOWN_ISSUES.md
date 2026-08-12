@@ -12,27 +12,23 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 
 - Work is on `fix/24-scoped-boot-registrations`, which carries this change on top of
   `master`; the branch's earlier work went in as PR #29 and the branch was rebuilt after
-  that merge. 199 tests, green, end-to-end included.
+  that merge. 203 tests, green, end-to-end included.
 - **Issues #30 to #35 are fixed** (table in §1), each with a test that fails without the
   fix.
-- Of the strategy in §6: moves 4 and 6 are done, move 3 is half done and its two
-  unfinished halves are the next steps below, move 5 was rejected in the shape the plan
-  gave it and each of its three items fixed separately, and move 1 stays rejected.
+- Of the strategy in §6: moves 3, 4 and 6 are done, move 5 was rejected in the shape the
+  plan gave it and each of its three items fixed separately, and move 1 stays rejected.
+- `php artisan async:audit` drives every parameterless GET route through a worker and
+  reports what each request leaves captured; `phpstan-framework.neon` points the static
+  half at `vendor/laravel`, where it reports four captures and nothing else — the URL
+  generator, the redirector, the response factory and `StartSession`, which is the
+  acceptance §6.3 asked for.
 
 ### Next, in order
 
-1. **`async:audit` command** (§6.3). The runtime walk reports what the moment it runs can
-   see, and at worker start that is almost nothing: Laravel resolves `url`, the response
-   factory and every singleton middleware lazily, during the first request. A command
-   that boots as a worker does, drives every parameterless GET route and prints the union
-   — with the route that provoked each finding — is what turns the walk into coverage.
-   Non-zero exit when anything is found, so CI can hold a baseline.
-2. **Point the PHPStan rule at code nobody has read.** `phpstan.neon` analyses `src`, so
-   `SingletonCapturesPerRequestRule` currently checks only this package. The third-party
-   coverage §6.3 promised needs a second config aimed at `vendor/laravel` and at the
-   application.
-3. The container contract gaps (§3) — only after the shape in §6.1 has a concurrency
+1. The container contract gaps (§3) — only after the shape in §6.1 has a concurrency
    harness behind it.
+2. §2 lists what the design cannot do. Each is pinned by a test; removing one needs a
+   different design rather than a fix.
 
 ### Working notes, so a cold start does not repeat today
 
@@ -219,14 +215,22 @@ map of alias to context key, kept current rather than snapshotted. Measured on t
 benchmark below: a per-request resolve went from 212 ns to 117 ns, because the check
 cost more than the work it guarded.
 
-**3. Make "a singleton captured a per-request object" impossible to miss — half done.**
-`PerRequestCaptureAudit` walks the resolved singletons and reports any holding a
-per-request object; `SingletonCapturesPerRequestRule` flags the same shape in a
-`singleton()` registration before the code runs. Both work, and both are pointed at the
-wrong place. The walk runs at worker start, where nothing per-request has been resolved
-yet — driven against the example application it found `url` and the response factory only
-after a request had gone through, which is why §0 puts an `async:audit` command next. The
-rule analyses `src`, so the third-party coverage it was justified by does not exist yet.
+**3. Make "a singleton captured a per-request object" impossible to miss — done.** Two
+halves, because neither covers the other. `SingletonCapturesPerRequestRule` reads
+`singleton()` registrations before the code runs and needs no application; pointed at
+`vendor/laravel` through `phpstan-framework.neon` it reports the URL generator taking the
+request, the redirector taking the generator, the response factory taking the redirector
+and `StartSession` taking the session manager — four, all real, nothing else in the whole
+of Illuminate. It sees only what a constructor signature says.
+
+`PerRequestCaptureAudit` reads objects instead, so it catches a capture made by a setter,
+an array element or an `extend()`. It can only report objects that exist, and at worker
+start almost nothing per-request does — Laravel builds `url`, the response factory and
+every singleton middleware on the first request that needs one. `async:audit` is
+therefore the delivery: it puts the application in a worker's state, drives every
+parameterless GET route, and collects the findings inside each request's own scope. The
+report at `enableAsyncMode()` stays as well, because it is free and it catches a capture
+made during bootstrap.
 
 The walk sees properties and array elements. Statics, closures and anything behind a
 resource are outside it by construction, so an empty result means clean as far as it
