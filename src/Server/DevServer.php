@@ -33,50 +33,7 @@ class DevServer implements ServerInterface
 
     public function prepareApp(): void
     {
-        if ($this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
-            $this->app->enableAsyncMode();
-        }
-
-        $this->configureDatabasePool();
-        \Spawn\Laravel\Redis\RedisPool::configure($this->app);
-
-        if (($view = $this->app->make('view')) instanceof \Spawn\Laravel\View\AsyncViewFactory) {
-            $view->bootCompleted();
-        }
-
-        if ($this->app->bound(\Spatie\Permission\PermissionRegistrar::class)) {
-            $registrar = $this->app->make(\Spatie\Permission\PermissionRegistrar::class);
-            if ($registrar instanceof \Spawn\Laravel\Permission\AsyncPermissionRegistrar) {
-                $registrar->bootCompleted();
-            }
-        }
-
-        if ($this->app->bound(\Inertia\ResponseFactory::class)) {
-            $inertia = $this->app->make(\Inertia\ResponseFactory::class);
-            if ($inertia instanceof \Spawn\Laravel\Inertia\AsyncResponseFactory) {
-                $inertia->bootCompleted();
-            }
-        }
-
-        if (($translator = $this->app->make('translator')) instanceof \Spawn\Laravel\Translation\AsyncTranslator) {
-            $translator->bootCompleted();
-        }
-
-        if (($config = $this->app->make('config')) instanceof \Spawn\Laravel\Config\AsyncConfig) {
-            $config->bootCompleted();
-        }
-
-        if (($events = $this->app->make('events')) instanceof \Spawn\Laravel\Events\AsyncDispatcher) {
-            $events->bootCompleted();
-        }
-
-        if (($router = $this->app->make('router')) instanceof \Spawn\Laravel\Routing\AsyncRouter) {
-            $router->bootCompleted();
-        }
-
-        if (class_exists(\Laravel\Telescope\Telescope::class) && method_exists(\Laravel\Telescope\Telescope::class, 'enableAsyncRecording')) {
-            \Laravel\Telescope\Telescope::enableAsyncRecording();
-        }
+        \Spawn\Laravel\Foundation\WorkerBootstrap::run($this->app);
     }
 
     public function start(): void

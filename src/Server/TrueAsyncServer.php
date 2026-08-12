@@ -7,6 +7,7 @@ use Illuminate\Contracts\Http\Kernel;
 use Spawn\Laravel\Async\RawIo;
 use Spawn\Laravel\Contracts\ServerInterface;
 use Spawn\Laravel\Foundation\ScopedService;
+use Spawn\Laravel\Foundation\WorkerBootstrap;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
@@ -200,99 +201,15 @@ class TrueAsyncServer implements ServerInterface
     }
 
     /**
-     * Everything a worker needs before its first request: async mode, the
-     * database and Redis pools, and the bootCompleted() hooks of every adapter.
+     * Everything a worker needs before its first request.
      *
-     * Runs once per worker thread, or once in this process when the server is
-     * not in pool mode.
+     * Runs once per worker thread, or once in this process when the server is not in
+     * pool mode. Kept as a method of the server because applications and other packages
+     * call it to initialise a thread of their own.
      */
     public static function initializeApp(Application $app): void
     {
-        set_time_limit(0);
-
-        if ($app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
-            $app->enableAsyncMode();
-        }
-
-        self::configureDatabasePool($app);
-
-        // Redis needs the same treatment: one shared connection would let
-        // concurrent coroutines interleave commands on a single socket.
-        \Spawn\Laravel\Redis\RedisPool::configure($app);
-
-        if (($view = $app->make('view')) instanceof \Spawn\Laravel\View\AsyncViewFactory) {
-            $view->bootCompleted();
-        }
-
-        if ($app->bound(\Spatie\Permission\PermissionRegistrar::class)) {
-            $registrar = $app->make(\Spatie\Permission\PermissionRegistrar::class);
-            if ($registrar instanceof \Spawn\Laravel\Permission\AsyncPermissionRegistrar) {
-                $registrar->bootCompleted();
-            }
-        }
-
-        if ($app->bound(\Inertia\ResponseFactory::class)) {
-            $inertia = $app->make(\Inertia\ResponseFactory::class);
-            if ($inertia instanceof \Spawn\Laravel\Inertia\AsyncResponseFactory) {
-                $inertia->bootCompleted();
-            }
-        }
-
-        if (($translator = $app->make('translator')) instanceof \Spawn\Laravel\Translation\AsyncTranslator) {
-            $translator->bootCompleted();
-        }
-
-        if (($config = $app->make('config')) instanceof \Spawn\Laravel\Config\AsyncConfig) {
-            $config->bootCompleted();
-        }
-
-        if (($events = $app->make('events')) instanceof \Spawn\Laravel\Events\AsyncDispatcher) {
-            $events->bootCompleted();
-        }
-
-        if (($router = $app->make('router')) instanceof \Spawn\Laravel\Routing\AsyncRouter) {
-            $router->bootCompleted();
-        }
-
-        if (class_exists(\Laravel\Telescope\Telescope::class)
-            && method_exists(\Laravel\Telescope\Telescope::class, 'enableAsyncRecording')) {
-            \Laravel\Telescope\Telescope::enableAsyncRecording();
-        }
-    }
-
-    /**
-     * Give every database connection the PDO Pool options, so that each
-     * coroutine gets its own physical connection instead of sharing one.
-     */
-    private static function configureDatabasePool(Application $app): void
-    {
-        $poolConfig = $app->make('config')->get('async.db_pool', []);
-
-        if (empty($poolConfig['enabled'])) {
-            return;
-        }
-
-        $connections = $app->make('config')->get('database.connections', []);
-
-        foreach (array_keys($connections) as $name) {
-            $app->make('config')->set(
-                "database.connections.{$name}.options",
-                array_replace(
-                    $app->make('config')->get("database.connections.{$name}.options", []),
-                    [
-                        \PDO::ATTR_POOL_ENABLED              => true,
-                        \PDO::ATTR_POOL_MIN                  => $poolConfig['min'] ?? 2,
-                        \PDO::ATTR_POOL_MAX                  => $poolConfig['max'] ?? 10,
-                        \PDO::ATTR_POOL_HEALTHCHECK_INTERVAL => $poolConfig['healthcheck_interval'] ?? 30,
-                    ]
-                )
-            );
-        }
-
-        // Anything resolved during bootstrap still holds a non-pooled connection.
-        if ($app->bound('db')) {
-            $app->make('db')->purge();
-        }
+        WorkerBootstrap::run($app);
     }
 
     private function registerStaticHandlers(HttpServer $server): void

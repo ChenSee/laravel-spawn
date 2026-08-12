@@ -3,16 +3,17 @@
 namespace Spawn\Laravel\Foundation;
 
 /**
- * Proxy returned to Laravel Facades for scoped services.
+ * Proxy placed in the Laravel facade cache for a per-request service.
  *
  * Facades cache the resolved instance in a static array. In a concurrent
  * environment this cache becomes shared across coroutines, causing state
  * leaks. Instead of clearing the cache on every request (which races with
  * other coroutines), we cache this proxy once. Every facade call goes through
- * __call → resolver → current_context() → the correct per-request instance.
+ * __call → resolver → the container → the correct per-request instance.
  *
- * DI injection (make / resolve) bypasses offsetGet and gets the real instance
- * directly, so type-hints work correctly.
+ * Only facades hold one. Type-hinted injection resolves through the container and
+ * receives the real instance, which is what makes it safe for a service that gets
+ * passed to a typed parameter — the Redirector and the CookieJar both do.
  */
 class ScopedServiceProxy
 {

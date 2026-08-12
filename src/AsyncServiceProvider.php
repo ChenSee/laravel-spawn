@@ -15,6 +15,7 @@ class AsyncServiceProvider extends ServiceProvider
         $this->registerConfigAdapter();
         $this->registerEventDispatcherAdapter();
         $this->registerRouterAdapter();
+        $this->registerUrlGeneratorAdapter();
         $this->registerTranslatorAdapter();
         $this->registerSessionAdapter();
         $this->registerAuthAdapter();
@@ -24,6 +25,8 @@ class AsyncServiceProvider extends ServiceProvider
         $this->registerSocialiteAdapter();
         $this->registerDebugbarAdapter();
         $this->registerViewAdapter();
+        $this->registerViteAdapter();
+        $this->registerLogContextAdapter();
         $this->registerTelescopeAdapter();
 
         $this->mergeConfigFrom(__DIR__ . '/../config/async.php', 'async');
@@ -40,6 +43,14 @@ class AsyncServiceProvider extends ServiceProvider
         $this->publishes([
             __DIR__ . '/../config/async.php' => config_path('async.php'),
         ], 'async-config');
+
+        // afterResolving rather than a resolve here: an artisan process has no reason to
+        // build the HTTP kernel, and the servers build it on their first request.
+        $this->app->afterResolving(\Illuminate\Contracts\Http\Kernel::class, function ($kernel): void {
+            if (method_exists($kernel, 'prependMiddleware')) {
+                $kernel->prependMiddleware(\Spawn\Laravel\Http\Middleware\RestorePerRequestFacades::class);
+            }
+        });
     }
 
     private function registerDebugbarAdapter(): void
@@ -264,18 +275,76 @@ class AsyncServiceProvider extends ServiceProvider
             return new \Spawn\Laravel\Routing\AsyncRouter($app['events'], $app);
         });
 
+        // The kernel holds the router it was built with, so one resolved before this
+        // provider ran is holding the stock one. Forgetting it is also what lets the
+        // afterResolving() hook in boot() fire at all: a callback registered for an
+        // already-resolved singleton never runs, and public/index.php resolves the kernel
+        // before bootstrapping. RestorePerRequestFacades depends on that.
         if ($this->app->resolved(\Illuminate\Contracts\Http\Kernel::class)) {
             $this->app->forgetInstance(\Illuminate\Contracts\Http\Kernel::class);
         }
     }
 
+    private function registerUrlGeneratorAdapter(): void
+    {
+        if (! $this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+            return;
+        }
+
+        // The stock generator is one object kept in step with the current request through
+        // rebinding('request'), so under concurrency every request overwrites the request,
+        // the cached root and the cached scheme that all the others are reading. Built per
+        // request there is nothing to keep in step: it is constructed with the request it
+        // belongs to, and no rebinding moves it onto another.
+        $this->app->scopedSingleton('url', function ($app) {
+            $routes = $app['router']->getRoutes();
+
+            // The stock factory publishes the collection so that rebinding('routes') has
+            // something to rebind. It is the router's own object and never changes.
+            if (! $app->bound('routes')) {
+                $app->instance('routes', $routes);
+            }
+
+            $prototype = $app->scopedPrototype('url');
+
+            // A provider's boot() configures the generator through setters —
+            // URL::forceScheme('https'), forceRootUrl(), defaults(), formatHostUsing() —
+            // and all of it is instance state a fresh object would not have. Behind a TLS
+            // proxy the loss is silent and total: every route() and asset() comes out
+            // http. setRequest() is what the framework itself calls to move a generator
+            // onto a request, and it clears exactly the two cached strings that are
+            // request state.
+            if ($prototype instanceof \Illuminate\Routing\UrlGenerator) {
+                $url = clone $prototype;
+                $url->setRoutes($routes);
+                $url->setRequest($app->make('request'));
+
+                return $url;
+            }
+
+            return new \Illuminate\Routing\UrlGenerator(
+                $routes,
+                $app->make('request'),
+                $app->make('config')->get('app.asset_url'),
+            );
+        });
+
+        // The response factory takes the redirector in its constructor, so a shared one
+        // flashes through the redirector of whichever request built it — the same defect
+        // one level up. It carries no state of its own, so a fresh one per request costs
+        // an allocation.
+        $this->app->scopedSingleton(
+            \Illuminate\Contracts\Routing\ResponseFactory::class,
+            fn ($app) => new \Illuminate\Routing\ResponseFactory(
+                $app[\Illuminate\Contracts\View\Factory::class],
+                $app['redirect'],
+            ),
+        );
+    }
+
     private function registerViewAdapter(): void
     {
-        // Replace the stock View Factory with our async-safe version.
-        // ViewServiceProvider is never deferred, so a simple singleton() rebinding
-        // works — AsyncServiceProvider always registers after ViewServiceProvider
-        // in the provider list, so we overwrite cleanly.
-        $this->app->singleton('view', function ($app) {
+        $build = function ($app) {
             $factory = new \Spawn\Laravel\View\AsyncViewFactory(
                 $app['view.engine.resolver'],
                 $app['view.finder'],
@@ -285,6 +354,66 @@ class AsyncServiceProvider extends ServiceProvider
             $factory->share('app', $app);
 
             return $factory;
+        };
+
+        // Replace the stock View Factory with our async-safe version.
+        // ViewServiceProvider is never deferred, so a simple singleton() rebinding
+        // works — AsyncServiceProvider always registers after ViewServiceProvider
+        // in the provider list, so we overwrite cleanly.
+        //
+        // One factory per worker, deliberately: templates receive it as $__env,
+        // Component::$factory caches it in a static, and MailManager and Markdown keep it
+        // in their constructors. What is per-request is the state it writes — see
+        // AsyncViewFactory.
+        $this->app->singleton('view', $build);
+    }
+
+    private function registerLogContextAdapter(): void
+    {
+        if (! $this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+            return;
+        }
+
+        // ContextServiceProvider registers the repository with Laravel's own scoped(),
+        // so the container already gives every request one of its own. What a request
+        // does not get is what bootstrap put there — a deployment id, a worker name —
+        // because a fresh repository starts empty. Copying it in makes the boot-time
+        // context the baseline every request starts from, which is what it is under
+        // php-fpm, where bootstrap runs inside the request.
+        $this->app->scopedSeeder(
+            \Illuminate\Log\Context\Repository::class,
+            fn ($fresh, $prototype) => $fresh->add($prototype->all())->addHidden($prototype->allHidden()),
+        );
+    }
+
+    private function registerViteAdapter(): void
+    {
+        if (! $this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
+            return;
+        }
+
+        // Vite is one object holding two pieces of request state. The CSP nonce, which a
+        // middleware sets per request: shared, a page goes out carrying another request's
+        // nonce, and under CSP the browser blocks every script on it — a blank page and
+        // nothing in the log. And the preloaded assets, appended while rendering and read
+        // back by AddLinkHeadersForPreloadedAssets: shared, the Link: rel=preload header
+        // grows on every response for ever, including JSON that rendered nothing.
+        //
+        // Everything else on the object is configuration, set once at boot through
+        // useBuildDirectory(), useHotFile() and the tag attribute resolvers. Cloning the
+        // boot-time object carries all of it; flush() empties the assets, and the nonce
+        // is whatever boot left, which is normally none.
+        $this->app->scopedSingleton(\Illuminate\Foundation\Vite::class, function ($app) {
+            $prototype = $app->scopedPrototype(\Illuminate\Foundation\Vite::class);
+
+            if (! $prototype instanceof \Illuminate\Foundation\Vite) {
+                return new \Illuminate\Foundation\Vite();
+            }
+
+            $vite = clone $prototype;
+            $vite->flush();
+
+            return $vite;
         });
     }
 

@@ -9,3 +9,14 @@ parameters:
 
 rules:
     - Spawn\Laravel\PHPStan\MutableStaticPropertyRule
+
+services:
+    # An application that scopes services of its own lists their types in
+    # perRequestTypes: the container reads config('async.scoped_services') at runtime,
+    # and static analysis has no container to ask.
+    -
+        class: Spawn\Laravel\PHPStan\SingletonCapturesPerRequestRule
+        arguments:
+            perRequestTypes: []
+        tags:
+            - phpstan.rules.rule

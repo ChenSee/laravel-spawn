@@ -8,10 +8,10 @@ use PHPUnit\Framework\TestCase;
 use Spawn\Laravel\Foundation\AsyncApplication;
 
 /**
- * The two reports the container makes about a worker that will silently lose its
- * boot-time configuration.
+ * The reports the container makes about a worker whose per-request state will silently
+ * leak: configuration lost at boot, and boot-time objects captured by shared services.
  *
- * Both go through error_log(), which is observable: pointed at a file by the
+ * All of them go through error_log(), which is observable: pointed at a file by the
  * error_log ini setting, that is where the message lands. Nothing else about them is
  * — they carry no return value and throw nothing — so the log is the contract.
  */
@@ -107,6 +107,112 @@ class AsyncDiagnosticsTest extends TestCase
         $app = $this->container(['widgets'], diagnostics: false);
         $app->singleton('widgets', fn () => new \stdClass());
         $app->make('widgets');
+
+        $this->assertSame('', $this->logged($app->enableAsyncMode(...)), 'the report is opt-in');
+    }
+
+    /**
+     * A container where 'widgets' is per-request, carries its configuration itself, and
+     * has a boot-time instance for a shared service to capture.
+     *
+     * The seeder is what keeps the other report quiet, so a test can assert on the whole
+     * log rather than on a substring of it.
+     */
+    private function containerWithPerRequestWidget(bool $diagnostics = true): AsyncApplication
+    {
+        $app = $this->container(['widgets'], diagnostics: $diagnostics);
+        $app->singleton('widgets', fn () => new \stdClass());
+        $app->scopedSeeder('widgets', function (): void {
+        });
+        $app->make('widgets');
+
+        return $app;
+    }
+
+    public function test_a_singleton_that_captured_a_per_request_object_is_reported(): void
+    {
+        $app = $this->containerWithPerRequestWidget();
+
+        /* The StartSession shape: a singleton keeping the scoped service. */
+        $app->singleton('middleware', fn ($app) => new class ($app->make('widgets')) {
+            public function __construct(public object $captured)
+            {
+            }
+        });
+        $app->make('middleware');
+
+        $written = $this->logged($app->enableAsyncMode(...));
+
+        $this->assertStringContainsString("shared service 'middleware'", $written);
+        $this->assertStringContainsString("per-request 'widgets'", $written);
+        $this->assertStringContainsString('->captured', $written);
+    }
+
+    public function test_the_report_names_the_whole_path_to_the_captured_object(): void
+    {
+        $app = $this->containerWithPerRequestWidget();
+
+        /* One level down: the singleton holds a collaborator, and the collaborator holds it. */
+        $app->singleton('middleware', function ($app) {
+            $collaborator = new class ($app->make('widgets')) {
+                public function __construct(public object $inner)
+                {
+                }
+            };
+
+            return new class ($collaborator) {
+                public function __construct(public object $helper)
+                {
+                }
+            };
+        });
+        $app->make('middleware');
+
+        $this->assertStringContainsString('->helper->inner', $this->logged($app->enableAsyncMode(...)));
+    }
+
+    public function test_a_singleton_holding_the_container_is_not_reported(): void
+    {
+        $app = $this->containerWithPerRequestWidget();
+
+        $app->singleton('middleware', fn ($app) => new class ($app) {
+            public function __construct(public object $app)
+            {
+            }
+        });
+        $app->make('middleware');
+
+        $this->assertSame(
+            '',
+            $this->logged($app->enableAsyncMode(...)),
+            'the container holds every per-request service by definition; reaching one through it is not a capture',
+        );
+    }
+
+    public function test_a_singleton_that_captured_nothing_per_request_is_not_reported(): void
+    {
+        $app = $this->containerWithPerRequestWidget();
+
+        $app->singleton('middleware', fn () => new class (new \stdClass()) {
+            public function __construct(public object $ownCollaborator)
+            {
+            }
+        });
+        $app->make('middleware');
+
+        $this->assertSame('', $this->logged($app->enableAsyncMode(...)));
+    }
+
+    public function test_no_capture_is_reported_while_diagnostics_are_off(): void
+    {
+        $app = $this->containerWithPerRequestWidget(diagnostics: false);
+
+        $app->singleton('middleware', fn ($app) => new class ($app->make('widgets')) {
+            public function __construct(public object $captured)
+            {
+            }
+        });
+        $app->make('middleware');
 
         $this->assertSame('', $this->logged($app->enableAsyncMode(...)), 'the report is opt-in');
     }

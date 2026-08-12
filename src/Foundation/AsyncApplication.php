@@ -5,8 +5,8 @@ namespace Spawn\Laravel\Foundation;
 use Closure;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Foundation\Application;
-use Illuminate\Support\Facades\Facade;
 
+use function Async\coroutine_context;
 use function Async\current_context;
 use function Async\request_context;
 use function Async\root_context;
@@ -14,19 +14,14 @@ use function Async\root_context;
 class AsyncApplication extends Application
 {
     /**
-     * Scoped services that are safe to proxy via offsetGet (used by Facades).
-     * Services that get passed to typed PHP parameters must NOT be here,
-     * because ScopedServiceProxy does not extend/implement their types.
-     *
-     * 'cookie' is excluded: AuthManager passes $app['cookie'] to setCookieJar(QueueingFactory).
-     * 'auth.driver' is excluded: guards are passed to typed parameters in some middleware.
-     * 'redirect' is excluded: RoutingServiceProvider passes $app['redirect'] to
-     * ResponseFactory::__construct(Redirector $redirector).
+     * Context key under which a coroutine counts the per-request factories it is inside.
      */
-    private const FACADE_PROXIED_MAP = [
-        'auth'    => true,
-        'session' => true,
-    ];
+    private const BUILDING_SCOPED = 'spawn.building-scoped';
+
+    /**
+     * Context key under which a request keeps its own terminating callbacks.
+     */
+    private const TERMINATING = 'spawn.terminating';
 
     /**
      * True while the async HTTP server is running.
@@ -73,6 +68,15 @@ class AsyncApplication extends Application
      * Guards the config read in perRequestKey() against asking itself the question.
      */
     private bool $readingScopedConfig = false;
+
+    /**
+     * Whether the configured list has been read for the last time.
+     *
+     * Until it is, perRequestKey() retries the read on every alias it does not
+     * recognise, because a list that came back empty may only mean the package config
+     * had not been merged yet.
+     */
+    private bool $scopedConfigIsFinal = false;
 
     /**
      * Aliases the application deliberately replaced with instance() while serving,
@@ -126,23 +130,23 @@ class AsyncApplication extends Application
 
         if ($config !== null) {
             $this->cacheConfiguredScopedServices($config->get('async.scoped_services', []));
+
+            // Bootstrap is over, so this is the list. Without the latch an application
+            // that scopes nothing — the shipped default — re-reads the config on every
+            // resolve that misses, which is most of the hundreds a request makes.
+            $this->scopedConfigIsFinal = true;
         }
 
         $this->captureScopedPrototypes();
         $this->reportPrematureAsyncMode();
 
-        // A facade resolved during bootstrap keeps the boot-time instance in a static
-        // array of its own and would go on handing it to every coroutine, never once
-        // asking offsetGet() for the scoped proxy. Only the proxied aliases are dropped,
-        // because only they get a proxy back; clearing the others would trade a pinned
-        // boot-time instance for a pinned instance of whichever coroutine asked first,
-        // which is worse. Those need a proxy of their own to be fixed at all.
-        foreach (array_keys(self::FACADE_PROXIED_MAP) as $proxied) {
-            Facade::clearResolvedInstance($proxied);
+        foreach ($this->scopedAliases() as $alias) {
+            $this->proxyFacade($alias);
         }
 
         if ($config !== null && $config->get('async.diagnostics', false)) {
             $this->reportScopedServiceRisks();
+            $this->reportPerRequestCaptures();
         }
     }
 
@@ -269,10 +273,6 @@ class AsyncApplication extends Application
     {
         $alias = $this->getAlias($key);
 
-        if ($this->asyncMode && isset(self::FACADE_PROXIED_MAP[$alias])) {
-            return new ScopedServiceProxy(fn() => $this->tryResolveScoped($alias));
-        }
-
         // 'request' is always safe to resolve — even during bootstrap when no
         // HTTP request exists yet. Without this, any code that touches $app['request']
         // before the first onRequest() call crashes with "Class request does not exist".
@@ -369,33 +369,42 @@ class AsyncApplication extends Application
             return $instance;
         }
 
-        if (isset($this->scopedBindings[$alias])) {
-            $instance = ($this->scopedBindings[$alias])($this);
-        } else {
-            $bindings = $this->getBindings();
-            if (isset($bindings[$alias])) {
-                $concrete = $bindings[$alias]['concrete'];
-                // Same call shape as Container::build(), which hands the factory the
-                // parameter overrides as a second argument.
-                $instance = $concrete instanceof \Closure ? $concrete($this, []) : $this->build($concrete);
-            } elseif (class_exists($alias)) {
-                // A class the container was never told about — #[Scoped] is discovered
-                // on first resolve, so it arrives here with no binding behind it.
-                // Falling through would let the container keep it as a singleton.
-                $instance = $this->build($alias);
+        $instance = $this->whileBuildingScoped(function () use ($alias) {
+            if (isset($this->scopedBindings[$alias])) {
+                $built = ($this->scopedBindings[$alias])($this);
             } else {
-                // No factory registered (e.g. 'request' is stored in instances[], not bindings[]).
-                // Fall through to parent::resolve which handles instances[] correctly.
-                return null;
+                $bindings = $this->getBindings();
+                if (isset($bindings[$alias])) {
+                    $concrete = $bindings[$alias]['concrete'];
+                    // Same call shape as Container::build(), which hands the factory the
+                    // parameter overrides as a second argument.
+                    $built = $concrete instanceof \Closure ? $concrete($this, []) : $this->build($concrete);
+                } elseif (class_exists($alias)) {
+                    // A class the container was never told about — #[Scoped] is discovered
+                    // on first resolve, so it arrives here with no binding behind it.
+                    // Falling through would let the container keep it as a singleton.
+                    $built = $this->build($alias);
+                } else {
+                    // No factory registered (e.g. 'request' is stored in instances[], not
+                    // bindings[]). null says so to the caller below.
+                    return null;
+                }
             }
-        }
 
-        // extend() registrations live outside the factory, so building from the
-        // concrete alone would silently drop them for scoped services only. They run
-        // before seeding, because a decorating extender replaces the object and the
-        // registrations have to land on whatever the coroutine will actually use.
-        foreach ($this->getExtenders($alias) as $extender) {
-            $instance = $extender($instance, $this);
+            // extend() registrations live outside the factory, so building from the
+            // concrete alone would silently drop them for scoped services only. They run
+            // before seeding, because a decorating extender replaces the object and the
+            // registrations have to land on whatever the coroutine will actually use.
+            foreach ($this->getExtenders($alias) as $extender) {
+                $built = $extender($built, $this);
+            }
+
+            return $built;
+        });
+
+        if ($instance === null) {
+            // Fall through to parent::resolve, which handles instances[] correctly.
+            return null;
         }
 
         $this->seedScopedInstance($alias, $instance);
@@ -438,9 +447,8 @@ class AsyncApplication extends Application
      * later request, and holds its target — a guard, and the user inside it — alive
      * forever. Upstream registers one for every guard it builds.
      *
-     * Only refresh() is refused. rebinding() still works, because the framework uses
-     * it for objects that genuinely are shared and do have to follow the request,
-     * the URL generator among them.
+     * rebinding() is refused on the same grounds, but only while a per-request factory
+     * is running: see rebinding() below.
      */
     public function refresh($abstract, $target, $method)
     {
@@ -448,9 +456,162 @@ class AsyncApplication extends Application
             return parent::refresh($abstract, $target, $method);
         }
 
-        // rebinding() answers with the instance only when there is one to answer with,
-        // and callers do use the return value.
+        return $this->currentInstanceOf($abstract);
+    }
+
+    /**
+     * Drop a rebinding subscription made from inside a per-request factory.
+     *
+     * Everywhere else it is kept: a subscription registered by bootstrap is registered
+     * once, by code that runs once. One registered while a per-request service is built
+     * is registered again by every request, and the list belongs to the container, so it
+     * grows for as long as the worker lives. Laravel's own url extender registers one on
+     * every resolve of a per-request generator, which is how this was found.
+     *
+     * Nothing is lost by refusing it. A subscription keeps a long-lived object in step
+     * with the current request, and an object built for one request is built with that
+     * request already in hand.
+     */
+    public function rebinding($abstract, Closure $callback)
+    {
+        if (! $this->buildingScoped()) {
+            return parent::rebinding($abstract, $callback);
+        }
+
+        return $this->currentInstanceOf($abstract);
+    }
+
+    /**
+     * What refresh() and rebinding() answer with: the instance, and only when there is
+     * one, because callers do use the return value.
+     */
+    private function currentInstanceOf(string $abstract): mixed
+    {
         return $this->bound($abstract) ? $this->make($abstract) : null;
+    }
+
+    /**
+     * Whether a per-request factory is running above this call, in this coroutine.
+     *
+     * The depth is kept in coroutine_context(), which belongs to one coroutine and is
+     * inherited by nobody — unlike current_context(), which belongs to the scope and is
+     * shared by every coroutine of the request. Either a property of the container or
+     * the scope's context would let one coroutine answer this question for another the
+     * moment a factory suspends mid-build. Only the build path pays for it: a service
+     * already in the context never gets here.
+     */
+    private function buildingScoped(): bool
+    {
+        return ((int) (coroutine_context()->findLocal(self::BUILDING_SCOPED) ?? 0)) > 0;
+    }
+
+    /**
+     * Run $build with buildingScoped() true for this coroutine.
+     */
+    private function whileBuildingScoped(callable $build): mixed
+    {
+        $context = coroutine_context();
+        $depth   = (int) ($context->findLocal(self::BUILDING_SCOPED) ?? 0);
+
+        $context->set(self::BUILDING_SCOPED, $depth + 1, replace: true);
+
+        try {
+            return $build();
+        } finally {
+            if ($depth === 0) {
+                $context->unset(self::BUILDING_SCOPED);
+            } else {
+                $context->set(self::BUILDING_SCOPED, $depth, replace: true);
+            }
+        }
+    }
+
+    /**
+     * Register a callback to run when the request that registered it finishes.
+     *
+     * Upstream keeps one list on the container and never empties it. Under a worker that
+     * means a callback registered while serving runs again at the end of every later
+     * request — N times on the Nth — and the list grows for as long as the process lives,
+     * holding whatever its closures captured. terminating() is public API and controllers
+     * and middleware call it once per request, so the growth is the normal case.
+     *
+     * Outside a request the list is still the container's: an artisan command has no
+     * request to attach a callback to.
+     */
+    public function terminating($callback)
+    {
+        $callbacks = $this->requestCallbacks();
+
+        if ($callbacks === null) {
+            return parent::terminating($callback);
+        }
+
+        $callbacks->add($callback);
+
+        return $this;
+    }
+
+    /**
+     * Run the process-wide terminating callbacks, then this request's own.
+     *
+     * The process-wide ones were registered by bootstrap, once, and upstream runs them
+     * at the end of every request the same way — in php-fpm the process is one request.
+     */
+    public function terminate()
+    {
+        parent::terminate();
+
+        $callbacks = $this->requestCallbacks();
+
+        if ($callbacks === null) {
+            return;
+        }
+
+        while (($queued = $callbacks->drain()) !== []) {
+            foreach ($queued as $callback) {
+                $this->call($callback);
+            }
+        }
+
+        $this->scopeContext()->unset(self::TERMINATING);
+    }
+
+    /**
+     * The terminating list of the request being served, or null when there is no request.
+     */
+    private function requestCallbacks(): ?PerRequestCallbacks
+    {
+        if (! $this->asyncMode) {
+            return null;
+        }
+
+        $context = $this->scopeContext();
+
+        if ($context === root_context()) {
+            return null;
+        }
+
+        $callbacks = $context->find(self::TERMINATING);
+
+        if (! $callbacks instanceof PerRequestCallbacks) {
+            $callbacks = new PerRequestCallbacks();
+
+            $context->set(self::TERMINATING, $callbacks);
+        }
+
+        return $callbacks;
+    }
+
+    /**
+     * The instance bootstrap left behind for a per-request alias, or null if it never
+     * resolved one.
+     *
+     * A per-request factory that has to keep boot-time configuration clones it: the
+     * object bootstrap configured is the only place that configuration exists.
+     */
+    public function scopedPrototype(string $abstract): ?object
+    {
+        return $this->scopedPrototypes[$this->getAlias($abstract)] ?? null;
     }
 
     /**
@@ -536,6 +697,96 @@ class AsyncApplication extends Application
     }
 
     /**
+     * Shared services that hold an object belonging to a single request.
+     *
+     * This is the pattern behind half the isolation bugs found so far: a singleton takes
+     * a per-request service in its constructor, keeps it in a property, and answers every
+     * later request through the first request's object. StartSession was found this way
+     * only after two concurrent logins left with the same session cookie.
+     *
+     * Only objects that exist can be found in anything, so the answer is about the moment
+     * it is asked. At worker start that means whatever bootstrap resolved; during a
+     * request it means that request's own services as well, and those are the ones a
+     * lazily built singleton captures. Asked before either, the answer is empty and says
+     * nothing about the application.
+     *
+     * @return array<string, array<string, string>> shared alias => (path to the captured
+     *   object => the per-request alias it serves)
+     */
+    public function perRequestCaptures(): array
+    {
+        $identity = $this->perRequestIdentity();
+
+        if ($identity === []) {
+            return [];
+        }
+
+        $audit = PerRequestCaptureAudit::against($identity, [$this]);
+        $found = [];
+
+        foreach ($this->instances as $alias => $instance) {
+            if (! is_object($instance) || $instance === $this || $audit->isPerRequest($instance)) {
+                continue;
+            }
+
+            $captures = $audit->capturesIn($instance);
+
+            if ($captures !== []) {
+                $found[$alias] = $captures;
+            }
+        }
+
+        return $found;
+    }
+
+    /**
+     * Every object that currently stands for a per-request alias.
+     *
+     * A per-request instance lives in the request's context and never in the container,
+     * so $instances says nothing about it; bootstrap's own instance is the exception,
+     * and it is kept as the scoped prototype. Both are listed, because a singleton built
+     * at boot captured the first and one built during a request captures the second.
+     *
+     * @return array<string, object[]> alias => the objects serving it
+     */
+    private function perRequestIdentity(): array
+    {
+        $context  = $this->scopeContext();
+        $identity = [];
+
+        foreach ($this->scopedAliases() as $alias) {
+            $objects = [];
+            $live    = $context->find($this->perRequestKeys[$alias]);
+
+            if (is_object($live)) {
+                $objects[] = $live;
+            }
+
+            if (isset($this->scopedPrototypes[$alias])) {
+                $objects[] = $this->scopedPrototypes[$alias];
+            }
+
+            if ($objects !== []) {
+                $identity[$alias] = $objects;
+            }
+        }
+
+        return $identity;
+    }
+
+    private function reportPerRequestCaptures(): void
+    {
+        foreach ($this->perRequestCaptures() as $alias => $captures) {
+            foreach ($captures as $path => $captured) {
+                error_log(
+                    "[async] shared service '{$alias}' holds the per-request '{$captured}' in ->{$path}; "
+                    .'every later request is served through the first one'
+                );
+            }
+        }
+    }
+
+    /**
      * Whether this alias gets a fresh instance per coroutine.
      *
      * Fills the config-declared half of the answer on first use, because extend() can
@@ -567,10 +818,15 @@ class AsyncApplication extends Application
             return $this->perRequestKeys[$alias];
         }
 
-        // Reading the config resolves a service, which asks this question again. The
-        // guard is on re-entry rather than on "already loaded", so an empty answer from
-        // a config that was not merged yet is retried instead of latched.
-        if ($this->scopedServiceCache === [] && ! $this->readingScopedConfig && $this->resolved('config')) {
+        // Reading the config resolves a service, which asks this question again, so the
+        // guard is on re-entry. An empty answer is retried rather than latched, because
+        // it may only mean the package config has not been merged yet — until
+        // enableAsyncMode() declares the list final, after which retrying would cost a
+        // config read on every resolve that is not per-request.
+        if (! $this->scopedConfigIsFinal
+            && $this->scopedServiceCache === []
+            && ! $this->readingScopedConfig
+            && $this->resolved('config')) {
             $this->readingScopedConfig = true;
 
             try {
@@ -608,7 +864,61 @@ class AsyncApplication extends Application
     {
         $alias = $this->getAlias($abstract);
 
-        $this->perRequestKeys[$alias] ??= ScopedService::tryFrom($alias) ?? $alias;
+        if (isset($this->perRequestKeys[$alias])) {
+            return;
+        }
+
+        $this->perRequestKeys[$alias] = ScopedService::tryFrom($alias) ?? $alias;
+
+        // Laravel adds to its own scoped list while the worker runs — a deferred provider
+        // calling scoped(), the #[Scoped] attribute found on first resolve — and a facade
+        // of such an alias has usually cached an instance by then.
+        if ($this->asyncMode) {
+            $this->proxyFacade($alias);
+        }
+    }
+
+    /**
+     * Make the facade of a per-request alias ask the container on every call.
+     *
+     * A facade keeps the instance it resolved in a static array shared by the whole
+     * process, so the first coroutine to touch one decides what every later request
+     * gets. The entry is replaced with a proxy that resolves per coroutine instead,
+     * which needs no list of facade names.
+     *
+     * The proxy lives in the facade cache and nowhere else. A proxy returned from
+     * offsetGet() would also reach the constructors that take $app['redirect'] and
+     * $app['cookie'] as typed parameters, and it satisfies neither type.
+     */
+    private function proxyFacade(string $alias): void
+    {
+        FacadeCache::put($alias, new ScopedServiceProxy(fn () => $this->make($alias)));
+    }
+
+    /**
+     * Put back the per-request facade entries something removed after start-up.
+     *
+     * `Illuminate\Foundation\Http\Kernel::sendRequestThroughRouter()` calls
+     * `Request::clearResolvedInstance()` before the pipeline runs, so from that point the
+     * request facade has no per-coroutine entry and the next coroutine to touch it caches
+     * its own request for every other coroutine to read. Restoring the entries is the
+     * whole fix; the earliest place after the removal is the first middleware, which is
+     * why {@see \Spawn\Laravel\Http\Middleware\RestorePerRequestFacades} exists.
+     *
+     * Entries already in place are left alone, so this costs one hash lookup per
+     * per-request alias and no allocation in the normal case.
+     */
+    public function restorePerRequestFacades(): void
+    {
+        if (! $this->asyncMode) {
+            return;
+        }
+
+        foreach ($this->scopedAliases() as $alias) {
+            if (! FacadeCache::holdsProxy($alias)) {
+                $this->proxyFacade($alias);
+            }
+        }
     }
 
     /**
