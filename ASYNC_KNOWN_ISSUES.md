@@ -212,11 +212,15 @@ fails identically on `master`.
 `file_put_contents($path, $data, FILE_APPEND | LOCK_EX)` from five or more coroutines at
 once ends the process's useful life: nothing is written, no call returns, and nothing else
 is served either. Four at once always finish. The threshold is `UV_THREADPOOL_SIZE`, which
-defaults to 4: `flock()` is offloaded to the libuv pool and a waiting task holds its
-thread, so with every thread parked in `flock()` nothing is left to run the work that
-would release the lock. Filed as
-[true-async/php-async#221](https://github.com/true-async/php-async/issues/221), with a
-twenty-line reproduction that needs no Laravel and no server extension.
+defaults to 4: `flock()` was offloaded to the libuv pool and a waiting task held its
+thread, and reads and writes of a regular file are `uv_fs` requests on the same pool, so
+the holder's own write had no thread left and the lock was never released.
+
+**Fixed in the runtime**, [true-async/php-async#221](https://github.com/true-async/php-async/issues/221)
+by [php-src#18](https://github.com/true-async/php-src/pull/18): the wait happens on the
+coroutine now, `flock(LOCK_NB)` and a timer. The note stays because the fix is on
+`true-async-stable` and in no release yet — a worker built before it still stops, and the
+twenty-line reproduction in the issue says in a second which build is in use.
 
 **It reaches an application through the shipped defaults.** `Filesystem::put($path, $data,
 true)` passes `LOCK_EX`, and both `FileSessionHandler::write()` and `FileStore::put()` call
