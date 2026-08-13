@@ -171,7 +171,12 @@ $main = spawn(static function () use ($autoload, $bootstrap, $log, $host, $port,
 
     $check(
         'render-load: every page carries its own token in every place'
-            . ($missing === [] ? '' : ' — ' . json_encode(array_slice($missing, 0, 3))),
+            . ($missing === [] ? '' : sprintf(
+                ' — %d of %d requests, first %s',
+                count($missing),
+                $concurrency,
+                json_encode(array_slice($missing, 0, 3, true)),
+            )),
         $missing === []
     );
 
