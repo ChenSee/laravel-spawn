@@ -82,10 +82,6 @@ $router->get('/request-scope', function () {
 //
 // The terminating callback is checked as well as the response, because it runs after the
 // body is built and reads the log context, which nothing in the body would show.
-//
-// The `@once` block carries an explicit id. Blade mints one as a UUID at compile time, so
-// two includes of a view recompiled between them hold different ids and both emit — which
-// says nothing about whether the per-request ledger works (ASYNC_KNOWN_ISSUES.md §2.10).
 app('view')->composer('load.partials.aside', fn () => \Async\suspend());
 
 $router->get('/render-load', function (Illuminate\Http\Request $request) {

@@ -146,16 +146,17 @@ visibly; where none is named, nothing will notice the change but a reader.
    is for the proxy rather than for the slot being occupied. A test harness that clears
    the whole array has to enable async mode again, or its facades go back to pinning the
    first coroutine's instance.
-9. **A view recompiled while a render is in flight breaks `@once`.** Blade mints the id of
-   an `@once` block as a UUID at compile time, so two `@include`s of the same view within
-   one render agree only while the compiled file stays put. The render-load stand caught
-   it on CI and nowhere else: four of sixty requests, always the same four, each emitting
-   the block twice, against `trueasync/php-true-async:latest`; sixty local runs with the
-   compiled cache cleared, with the sources touched throughout the run, and with a
-   suspension between the two includes never reproduced it, so the trigger is the image
-   and not the concurrency. Precompiled views (`artisan view:cache`) put it out of reach,
-   which is what a deployment does anyway. The fixture's `@once` carries an explicit id so
-   that the stand measures the per-request ledger rather than the compiler.
+9. **The tracing JIT loses `isset()` on a moved property, and the factory works around
+   it.** `isset($this->sections[$name])` reads a dimension of a property the factory does
+   not have, so the engine goes through `__isset()` and `__get()`; under
+   `opcache.jit=tracing` that path answers false for a key the array holds. Measured in
+   `trueasync/php-true-async:latest`: four of sixty concurrent pages emitted an `@once`
+   block twice, and a fifty-line script without Laravel reproduces it eight times a run
+   (`opcache.jit=off` and opcache off are both clean). Filed as
+   [true-async/php-async#223](https://github.com/true-async/php-async/issues/223). The
+   eight framework methods that ask this way are overridden in `AsyncViewFactory` to fetch
+   the array first, which always answers correctly; the price is eight method bodies
+   copied from upstream, which an upgrade can silently make stale.
 10. **`Cookie::shouldReceive()` in async mode mocks the proxy, not the service.**
    `Facade::getMockableClass()` returns `get_class(static::getFacadeRoot())`, and the root
    of a per-request facade is a `ScopedServiceProxy`, so the mock carries that class and

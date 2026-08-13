@@ -121,6 +121,133 @@ class AsyncViewFactory extends Factory
         unset($this->renderState()->$name);
     }
 
+    /*
+     * The eight methods below are the framework's own, with one change each: the array is
+     * fetched into a local before `isset()` asks about a key in it.
+     *
+     * `isset($this->sections[$name])` reads a dimension of a property this object does not
+     * have, so the engine goes through `__isset()` and `__get()`. Under the tracing JIT
+     * that path answers false for a key the array holds — measured at four pages in sixty
+     * losing an `@once` block, and the same shape decides `@push`, `@prepend` and every
+     * section (true-async/php-async#223). With the array in hand the answer is always
+     * right. Everything else in these methods is upstream's, so a change there has to be
+     * copied here; ViewRenderStateTest guards the properties, not the methods.
+     */
+
+    public function hasRenderedOnce(string $id)
+    {
+        $renderedOnce = $this->renderedOnce;
+
+        return isset($renderedOnce[$id]);
+    }
+
+    public function appendSection()
+    {
+        if (empty($this->sectionStack)) {
+            throw new \InvalidArgumentException('Cannot end a section without first starting one.');
+        }
+
+        $last     = array_pop($this->sectionStack);
+        $sections = $this->sections;
+
+        if (isset($sections[$last])) {
+            $this->sections[$last] .= ob_get_clean();
+        } else {
+            $this->sections[$last] = ob_get_clean();
+        }
+
+        return $last;
+    }
+
+    protected function extendSection($section, $content)
+    {
+        $sections = $this->sections;
+
+        if (isset($sections[$section])) {
+            $content = str_replace(static::parentPlaceholder($section), $content, $sections[$section]);
+        }
+
+        $this->sections[$section] = $content;
+    }
+
+    public function yieldContent($section, $default = '')
+    {
+        $sections       = $this->sections;
+        $sectionContent = $default instanceof \Illuminate\View\View ? $default : e($default);
+
+        if (isset($sections[$section])) {
+            $sectionContent = $sections[$section];
+        }
+
+        $sectionContent = str_replace('@@parent', '--parent--holder--', $sectionContent);
+
+        return str_replace(
+            '--parent--holder--', '@parent', str_replace(static::parentPlaceholder($section), '', $sectionContent)
+        );
+    }
+
+    protected function extendPush($section, $content)
+    {
+        $pushes = $this->pushes;
+
+        if (! isset($pushes[$section])) {
+            $this->pushes[$section] = [];
+            $pushes[$section]       = [];
+        }
+
+        if (! isset($pushes[$section][$this->renderCount])) {
+            $this->pushes[$section][$this->renderCount] = $content;
+        } else {
+            $this->pushes[$section][$this->renderCount] .= $content;
+        }
+    }
+
+    protected function extendPrepend($section, $content)
+    {
+        $prepends = $this->prepends;
+
+        if (! isset($prepends[$section])) {
+            $this->prepends[$section] = [];
+            $prepends[$section]       = [];
+        }
+
+        if (! isset($prepends[$section][$this->renderCount])) {
+            $this->prepends[$section][$this->renderCount] = $content;
+        } else {
+            $this->prepends[$section][$this->renderCount] =
+                $content . $prepends[$section][$this->renderCount];
+        }
+    }
+
+    public function yieldPushContent($section, $default = '')
+    {
+        if ($this->isStackEmpty($section)) {
+            return $default;
+        }
+
+        $output   = '';
+        $prepends = $this->prepends;
+        $pushes   = $this->pushes;
+
+        if (isset($prepends[$section])) {
+            $output .= implode(array_reverse($prepends[$section]));
+        }
+
+        if (isset($pushes[$section])) {
+            $output .= implode($pushes[$section]);
+        }
+
+        return $output;
+    }
+
+    public function isStackEmpty(string $section): bool
+    {
+        $pushes   = $this->pushes;
+        $prepends = $this->prepends;
+
+        return ! isset($pushes[$section]) && ! isset($prepends[$section]);
+    }
+
     /**
      * Share data with every view of this request, or of the worker before there are any.
      *
