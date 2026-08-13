@@ -146,7 +146,17 @@ visibly; where none is named, nothing will notice the change but a reader.
    is for the proxy rather than for the slot being occupied. A test harness that clears
    the whole array has to enable async mode again, or its facades go back to pinning the
    first coroutine's instance.
-9. **`Cookie::shouldReceive()` in async mode mocks the proxy, not the service.**
+9. **A view recompiled while a render is in flight breaks `@once`.** Blade mints the id of
+   an `@once` block as a UUID at compile time, so two `@include`s of the same view within
+   one render agree only while the compiled file stays put. The render-load stand caught
+   it on CI and nowhere else: four of sixty requests, always the same four, each emitting
+   the block twice, against `trueasync/php-true-async:latest`; sixty local runs with the
+   compiled cache cleared, with the sources touched throughout the run, and with a
+   suspension between the two includes never reproduced it, so the trigger is the image
+   and not the concurrency. Precompiled views (`artisan view:cache`) put it out of reach,
+   which is what a deployment does anyway. The fixture's `@once` carries an explicit id so
+   that the stand measures the per-request ledger rather than the compiler.
+10. **`Cookie::shouldReceive()` in async mode mocks the proxy, not the service.**
    `Facade::getMockableClass()` returns `get_class(static::getFacadeRoot())`, and the root
    of a per-request facade is a `ScopedServiceProxy`, so the mock carries that class and
    satisfies no type-hint the real service would. It reaches tests only: a worker is the
