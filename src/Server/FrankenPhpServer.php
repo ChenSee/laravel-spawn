@@ -10,10 +10,9 @@ use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 use Spawn\Laravel\Contracts\ServerInterface;
+use Spawn\Laravel\Foundation\RequestContext;
 use Spawn\Laravel\Foundation\ScopedService;
 use Spawn\Laravel\Server\Concerns\ManagesDatabasePool;
-
-use function Async\current_context;
 
 class FrankenPhpServer implements ServerInterface
 {
@@ -25,50 +24,7 @@ class FrankenPhpServer implements ServerInterface
 
     public function prepareApp(): void
     {
-        if ($this->app instanceof \Spawn\Laravel\Foundation\AsyncApplication) {
-            $this->app->enableAsyncMode();
-        }
-
-        $this->configureDatabasePool();
-        \Spawn\Laravel\Redis\RedisPool::configure($this->app);
-
-        if (($view = $this->app->make('view')) instanceof \Spawn\Laravel\View\AsyncViewFactory) {
-            $view->bootCompleted();
-        }
-
-        if ($this->app->bound(\Spatie\Permission\PermissionRegistrar::class)) {
-            $registrar = $this->app->make(\Spatie\Permission\PermissionRegistrar::class);
-            if ($registrar instanceof \Spawn\Laravel\Permission\AsyncPermissionRegistrar) {
-                $registrar->bootCompleted();
-            }
-        }
-
-        if ($this->app->bound(\Inertia\ResponseFactory::class)) {
-            $inertia = $this->app->make(\Inertia\ResponseFactory::class);
-            if ($inertia instanceof \Spawn\Laravel\Inertia\AsyncResponseFactory) {
-                $inertia->bootCompleted();
-            }
-        }
-
-        if (($translator = $this->app->make('translator')) instanceof \Spawn\Laravel\Translation\AsyncTranslator) {
-            $translator->bootCompleted();
-        }
-
-        if (($config = $this->app->make('config')) instanceof \Spawn\Laravel\Config\AsyncConfig) {
-            $config->bootCompleted();
-        }
-
-        if (($events = $this->app->make('events')) instanceof \Spawn\Laravel\Events\AsyncDispatcher) {
-            $events->bootCompleted();
-        }
-
-        if (($router = $this->app->make('router')) instanceof \Spawn\Laravel\Routing\AsyncRouter) {
-            $router->bootCompleted();
-        }
-
-        if (class_exists(\Laravel\Telescope\Telescope::class) && method_exists(\Laravel\Telescope\Telescope::class, 'enableAsyncRecording')) {
-            \Laravel\Telescope\Telescope::enableAsyncRecording();
-        }
+        \Spawn\Laravel\Foundation\WorkerBootstrap::run($this->app);
     }
 
     public function start(): void
@@ -96,7 +52,7 @@ class FrankenPhpServer implements ServerInterface
             try {
                 $request = $this->buildRequest($frankenRequest);
 
-                current_context()->set(ScopedService::REQUEST, $request);
+                RequestContext::current()->set(ScopedService::REQUEST, $request);
 
                 \Spawn\Laravel\Debugbar\ResetDebugbar::handle($this->app, $request);
 

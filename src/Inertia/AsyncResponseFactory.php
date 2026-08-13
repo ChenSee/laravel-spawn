@@ -8,14 +8,13 @@ use Illuminate\Support\Arr;
 use Inertia\ProvidesInertiaProperties;
 use Inertia\Response;
 use Inertia\ResponseFactory;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
  * Coroutine-safe Inertia ResponseFactory.
  *
  * Before bootCompleted(): behaves like stock ResponseFactory.
- * After bootCompleted(): per-request state is stored in current_context().
+ * After bootCompleted(): per-request state is stored in RequestContext.
  *
  * Isolated state: sharedProps, rootView, version, encryptHistory, urlResolver.
  */
@@ -32,7 +31,7 @@ class AsyncResponseFactory extends ResponseFactory
 
     private function getState(): array
     {
-        $ctx = current_context();
+        $ctx = RequestContext::current();
         $state = $ctx->find(self::CTX_KEY);
 
         if ($state === null) {
@@ -53,7 +52,7 @@ class AsyncResponseFactory extends ResponseFactory
     {
         $state = $this->getState();
         $state[$key] = $value;
-        current_context()->set(self::CTX_KEY, $state, replace: true);
+        RequestContext::current()->set(self::CTX_KEY, $state, replace: true);
     }
 
     public function share($key, $value = null): void

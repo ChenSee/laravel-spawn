@@ -4,14 +4,13 @@ namespace Spawn\Laravel\Permission;
 
 use Illuminate\Database\Eloquent\Model;
 use Spatie\Permission\PermissionRegistrar;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
  * Coroutine-safe PermissionRegistrar.
  *
  * Before bootCompleted(): behaves like stock PermissionRegistrar.
- * After bootCompleted(): per-request mutable state is stored in current_context().
+ * After bootCompleted(): per-request mutable state is stored in RequestContext.
  *
  * Isolated state:
  * - team ID (setPermissionsTeamId / getPermissionsTeamId)
@@ -42,7 +41,7 @@ class AsyncPermissionRegistrar extends PermissionRegistrar
             $id = $id->getKey();
         }
 
-        current_context()->set(self::CTX_TEAM_ID, $id, replace: true);
+        RequestContext::current()->set(self::CTX_TEAM_ID, $id, replace: true);
     }
 
     public function getPermissionsTeamId(): int|string|null
@@ -51,7 +50,7 @@ class AsyncPermissionRegistrar extends PermissionRegistrar
             return parent::getPermissionsTeamId();
         }
 
-        return current_context()->find(self::CTX_TEAM_ID);
+        return RequestContext::current()->find(self::CTX_TEAM_ID);
     }
 
     public function getWildcardPermissionIndex(Model $record): array
@@ -60,7 +59,7 @@ class AsyncPermissionRegistrar extends PermissionRegistrar
             return parent::getWildcardPermissionIndex($record);
         }
 
-        $ctx = current_context();
+        $ctx = RequestContext::current();
         $index = $ctx->find(self::CTX_WILDCARD_INDEX) ?? [];
 
         $key = $record::class . ':' . $record->getKey();
@@ -83,7 +82,7 @@ class AsyncPermissionRegistrar extends PermissionRegistrar
             return;
         }
 
-        $ctx = current_context();
+        $ctx = RequestContext::current();
 
         if ($record === null) {
             $ctx->set(self::CTX_WILDCARD_INDEX, [], replace: true);
@@ -99,7 +98,7 @@ class AsyncPermissionRegistrar extends PermissionRegistrar
      * In async mode this is a no-op. The shared $permissions collection is
      * read-only after initial load and safe to share across coroutines.
      * Octane's per-request reset is unnecessary — team ID and wildcard
-     * index are already isolated via current_context().
+     * index are already isolated via RequestContext.
      */
     public function clearPermissionsCollection(): void
     {

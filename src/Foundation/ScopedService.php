@@ -38,4 +38,40 @@ enum ScopedService: string
     case AUTH        = 'auth';
     case AUTH_DRIVER = 'auth.driver';
     case COOKIE      = 'cookie';
+
+    /**
+     * The types a constructor asks for when it wants this service.
+     *
+     * Both the concrete class and the contracts it is bound under are listed: a
+     * constructor typed against the interface receives the same per-request object as
+     * one typed against the class. Static analysis has no container to ask, so the
+     * binding has to be written down here.
+     *
+     * @return class-string[]
+     */
+    public function types(): array
+    {
+        return match ($this) {
+            self::REQUEST       => [\Illuminate\Http\Request::class],
+            self::SESSION       => [\Illuminate\Session\SessionManager::class],
+            self::SESSION_STORE => [
+                \Illuminate\Session\Store::class,
+                \Illuminate\Contracts\Session\Session::class,
+            ],
+            self::REDIRECT      => [\Illuminate\Routing\Redirector::class],
+            self::AUTH          => [
+                \Illuminate\Auth\AuthManager::class,
+                \Illuminate\Contracts\Auth\Factory::class,
+            ],
+            self::AUTH_DRIVER   => [
+                \Illuminate\Contracts\Auth\Guard::class,
+                \Illuminate\Contracts\Auth\StatefulGuard::class,
+            ],
+            self::COOKIE        => [
+                \Illuminate\Cookie\CookieJar::class,
+                \Illuminate\Contracts\Cookie\Factory::class,
+                \Illuminate\Contracts\Cookie\QueueingFactory::class,
+            ],
+        };
+    }
 }

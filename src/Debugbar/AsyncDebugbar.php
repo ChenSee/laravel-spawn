@@ -10,17 +10,16 @@ use Spawn\Laravel\Debugbar\Collectors\AsyncExceptionsCollector;
 use Spawn\Laravel\Debugbar\Collectors\AsyncMessagesCollector;
 use Spawn\Laravel\Debugbar\Collectors\AsyncTimeDataCollector;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
- * One Debugbar instance per worker, but request state kept per-coroutine.
+ * One Debugbar instance per worker, but request state kept per request.
  *
  * The worker serves many coroutine-requests concurrently. Debugbar assumes
  * "one instance = one request", so we keep a single instance (one set of event
  * subscriptions, registered once) and move its per-request mutable state into
- * current_context(): accumulating collectors are context-backed, and the
- * transient injection flag is hydrated per context.
+ * the request's context: accumulating collectors are context-backed, and the
+ * transient injection flag is hydrated per request.
  */
 class AsyncDebugbar extends LaravelDebugbar
 {
@@ -46,11 +45,11 @@ class AsyncDebugbar extends LaravelDebugbar
         // gap between reset() and here, so it must be per-context — otherwise a flag
         // set while serving one request would suppress injection in another.
         // handleResponse itself does not yield, so hydrating around the parent call is safe.
-        $this->responseIsModified = (bool) current_context()->find(self::CTX_RESPONSE_MODIFIED);
+        $this->responseIsModified = (bool) RequestContext::current()->find(self::CTX_RESPONSE_MODIFIED);
 
         $result = parent::handleResponse($request, $response);
 
-        current_context()->set(self::CTX_RESPONSE_MODIFIED, $this->responseIsModified);
+        RequestContext::current()->set(self::CTX_RESPONSE_MODIFIED, $this->responseIsModified);
 
         return $result;
     }
@@ -80,14 +79,14 @@ class AsyncDebugbar extends LaravelDebugbar
     public function collect(): array
     {
         $data = parent::collect();
-        current_context()->set(self::CTX_DATA, $data);
+        RequestContext::current()->set(self::CTX_DATA, $data);
 
         return $data;
     }
 
     public function getData(): array
     {
-        $data = current_context()->find(self::CTX_DATA);
+        $data = RequestContext::current()->find(self::CTX_DATA);
 
         if ($data === null) {
             $data = $this->collect();

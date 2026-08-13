@@ -2,35 +2,60 @@
 
 ## [Unreleased]
 
+### Fixed
+- Facades of per-request services answered the first coroutine that touched them (#30) — `Cookie::queue()` queued into another request's jar. Every per-request alias has a `ScopedServiceProxy` in the facade cache, `RestorePerRequestFacades` puts back the `request` entry the kernel drops on every request, and facade caching is off while async mode is on
+- Blade render state was shared between concurrent renders (#31) — two responses wrote into one set of sections, and one render's nesting counter reaching zero emptied the other's mid-page. The sixteen render properties moved into the request's context; the factory stays one object, because `$__env` and `Component::$factory` hold it
+- `UrlGenerator` answered for whichever request rebound `request` last (#32), so `url()->current()` and `redirect()->back()` could name another request's URL. `url` and the response factory are per-request, cloned from the boot-time objects so a provider's `URL::forceScheme()` survives
+- Boot-time log context did not reach requests (#33) — each request gets its own `Log\Context\Repository` and a fresh one starts empty, so a deployment id added at boot vanished from every log line. A seeder copies it in
+- Terminating callbacks accumulated and re-ran (#34), N times on the Nth request. The list belongs to the request now
+- `Vite` held the CSP nonce and the preloaded assets of whichever request wrote last (#35). Each request gets a clone of the boot-time object with the render state empty
+- Eight view-factory methods asked `isset($this->sections[$name])` about state the factory does not hold, which the tracing JIT answers false for a key the array holds ([true-async/php-async#223](https://github.com/true-async/php-async/issues/223)): four of sixty concurrent pages emitted an `@once` block twice, and `@push`, `@prepend` and every section are decided the same way. They are overridden to fetch the array first
+- The adapters kept per-request state in the coroutine's own context while the container used the request's, so a nested `Scope::inherit()` wrote its config overlay, locale, route, Inertia state and Telescope buffer where nothing would read them. All of them answer through `RequestContext::current()`
+- `RestorePerRequestFacades` never reached a kernel that an application provider resolved in its own `register()`: `afterResolving()` fires on a build, and the container answers a resolved singleton without building one. The provider now prepends to a kernel that is already there
+- Facade roots the container does not register were rebuilt on every call once async mode switched facade caching off (#30), so `Http::globalMiddleware()` and `Process::preventStrayProcesses()` configured an object nobody read again. Async mode registers such a root as a singleton
+
+### Changed
+- `AsyncViewFactory` keeps the render state of the context it last saw, so a `@foreach` stops asking the context on every property access: 785 to 668 microseconds per render at 500 rows a page (`tests/bench/bench_render.php`, release build, median of eleven runs)
+- `perRequestKey()` stops re-reading `config('async.scoped_services')` once async mode is on. With the shipped default of an empty list the read fired on every resolve that was not per-request
+
 ### Added
+- `run_render_load.php` (`RenderLoadE2ETest`) — sixty concurrent requests against a real `TrueAsyncServer`, each carrying its own token through the sections, `@push`, `@once`, a component slot, the cookie jar, the URL generator and a terminating callback, with the render suspending inside an `@include`. Make the render state shared again and every page comes back holding four other requests' tokens
+- `bench_render.php` — what the per-request render state costs a page, priced against the stock factory and against a process-wide state
+- `PerRequestCaptureAudit` — walks the resolved singletons and reports any holding an object that belongs to one request, the shape behind `StartSession` and `Redirector`. Runs at worker start under `async.diagnostics`; `AsyncApplication::perRequestCaptures()` returns the same findings to a caller
+- `SingletonCapturesPerRequestRule` — PHPStan rule flagging `singleton()` registrations whose object takes a per-request service in its constructor, in either the `singleton(Foo::class)` or the `singleton($abstract, fn () => new Foo(...))` shape
+- `async:audit` — drives every parameterless GET route through a worker and reports the shared services left holding a per-request object, with the URL that produced each. Non-zero exit when anything is found, so CI can hold a baseline. A worker at start-up has almost nothing per-request resolved, which is why the audit drives requests rather than reading a freshly booted container
+- `phpstan-framework.neon` — runs `SingletonCapturesPerRequestRule` over `vendor/laravel` instead of over this package. Against laravel/framework 12 it reports four, all real: `UrlGenerator` taking the request, `Redirector` taking the generator, `ResponseFactory` taking the redirector, `StartSession` taking the session manager
+- `AsyncApplication::scopedPrototype()` — the instance bootstrap left behind for a per-request alias, for a factory that has to clone boot-time configuration rather than rebuild it
+- `WorkerBootstrap` — one place for what a worker does between a booted application and its first request, replacing the copy in each of the three servers. Async mode is switched on last, after the adapters are told boot is over and the pools are configured, because switching it on is what snapshots the boot-time objects
+- README section on per-request services: the three registrations, when per-request is the wrong answer, what a seeder is for, and what `async.diagnostics` reports
 - Redis connection pool (#23) — `RedisManager` shares one connection with every coroutine, so concurrent commands used to interleave on a single socket (protocol errors, `unserialize()` failures under load)
   - `AsyncPhpRedisConnector` — builds pooled clients: connection settings move to the `Redis` constructor (pool mode rejects `connect()`), the rest is applied to the template as before
   - `RedisPool::configure()` — installs the connector into `RedisManager` and purges anything resolved during bootstrap; called by all three servers
   - `config/async.php` — new `redis_pool` section: `enabled`, `min`, `max`, `mux`
   - Requires the TrueAsync build of phpredis; Redis Cluster is not pooled
 - Laravel Debugbar compatibility (#14) — Debugbar now renders under async serving, with per-coroutine data isolation
-  - `AsyncDebugbar` — one instance per worker; request state (collected snapshot, `responseIsModified`) kept per-coroutine via `current_context()`; persistent storage disabled (its inline I/O in `collect()` would break render atomicity under concurrency)
-  - Context-backed collectors (`messages`, `time`, `exceptions`, `query`) via `DelegatesToContext` — one shared instance, per-coroutine data, so concurrent requests never mix debug data (`events`/`models` are a follow-up)
+  - `AsyncDebugbar` — one instance per worker; request state (collected snapshot, `responseIsModified`) kept per request via `RequestContext`; persistent storage disabled (its inline I/O in `collect()` would break render atomicity under concurrency)
+  - Context-backed collectors (`messages`, `time`, `exceptions`, `query`) via `DelegatesToContext` — one shared instance, per-request data, so concurrent requests never mix debug data (`events`/`models` are a follow-up)
   - `AsyncApplication::runningInConsole()` returns `false` while serving, so Debugbar (and other web-only packages) detect web context instead of the CLI SAPI
   - `ResetDebugbar` — per-request reset + boot, mirroring Laravel Octane's `ResetDebugbar`
 - `AsyncApplication` — extends Laravel's `Application` with per-coroutine service isolation
   - `enableAsyncMode()` — must be called before the HTTP server starts; artisan commands run as normal Laravel
   - `LARAVEL_SCOPED` — services that get a fresh instance per coroutine: `session`, `auth`, `auth.driver`, `cookie`
-  - `FACADE_PROXIED` — subset of scoped services returned as `ScopedServiceProxy` via `offsetGet()` so Laravel Facades always resolve the correct coroutine-local instance
+  - Facade cache seeded with a `ScopedServiceProxy` for every per-request alias, so a facade resolves the coroutine-local instance while `offsetGet()` goes on returning the real object to the constructors that type-hint it
   - `scopedSingleton()` — register custom per-coroutine services programmatically
   - `scopedSeeder()` — carry boot-time registrations (`extend()`, `viaRequest()`, setters on the resolved object) onto per-coroutine instances, which a factory alone cannot reproduce
   - `diagnostics` config key — report at worker startup any scoped service that bootstrap configured and no seeder covers
   - `scoped_services` config key — register scoped services via `config/async.php`
-- `ScopedServiceProxy` — lightweight proxy cached by Facades; delegates every call to `coroutine_context()` so concurrent requests never share state
+- `ScopedServiceProxy` — lightweight proxy cached by Facades; delegates every call to the container, which answers per request
 - `config/async.php` — publishable config with `scoped_services` list
 - `AsyncServiceProvider` — merges config, registers `serve` command, publishes config via `vendor:publish`
 - `DevServer` — minimal TCP server for local development only (`async:serve`), analogous to `php artisan serve`
 - `FrankenPhpServer` — production adapter for TrueAsync FrankenPHP (`async:franken`); uses `FrankenPHP\HttpServer::onRequest()`, generates Caddyfile + worker file in `storage/app/trueasync/` and starts the `frankenphp` binary as a subprocess
 - `ServerInterface` — contract for all server adapters (`prepareApp()`, `start()`)
-- `ManagesDatabasePool` trait — shared PDO Pool logic extracted from servers; used by both `DevServer` and `FrankenPhpServer`
+- `ManagesDatabasePool` trait — warms the PDO pool inside the server coroutine; used by `DevServer`
 
 - PDO Pool integration for async-safe database access
-  - `ManagesDatabasePool::configureDatabasePool()` — injects `PDO::ATTR_POOL_ENABLED` and related options into all database connection configs when `async.db_pool.enabled = true`
+  - `WorkerBootstrap` injects `PDO::ATTR_POOL_ENABLED` and related options into all database connection configs when `async.db_pool.enabled = true`
   - `ManagesDatabasePool::warmUpDatabasePool()` — forces the `DatabaseManager` to establish its connection inside the server coroutine before the accept loop starts, so the pool is created in the correct coroutine scope and shared across all request coroutines
   - `config/async.php` — extended with `db_pool` section: `enabled`, `min`, `max`, `healthcheck_interval`
 - PHPUnit test suite under `tests/` running inside `trueasync/php-true-async:latest` Docker image

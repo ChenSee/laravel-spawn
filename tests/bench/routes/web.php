@@ -48,10 +48,18 @@ $router->get('/boom', function () {
 // is null and the probe proves nothing.
 $router->get('/request-scope', function () {
     $inner = null;
+    $token = uniqid('probe', true);
 
     $nested = \Async\Scope::inherit();
-    $nested->spawn(function () use (&$inner) {
+    $nested->spawn(function () use (&$inner, $token) {
         $inner = spl_object_id(app('redirect'));
+
+        // The adapters keep their per-request state in the context the container uses,
+        // so a write here reaches the handler that spawned this coroutine. Under the
+        // scope's own context it would not: a context reaches its parents, never its
+        // children.
+        config(['spawn.probe' => $token]);
+        app()->setLocale('zz');
     });
     $nested->awaitCompletion(\Async\timeout(2000));
 
@@ -60,7 +68,40 @@ $router->get('/request-scope', function () {
     return response()->json([
         'request_scope' => \Async\request_context() !== null,
         'shared'        => $inner === $outer,
+        'config_shared' => config('spawn.probe') === $token,
+        'locale_shared' => app()->getLocale() === 'zz',
         'id'            => $outer,
+    ]);
+});
+
+// Render-load probe (RenderLoadE2ETest, TrueAsyncServer only): one request writes its
+// token into every path a page collects state in, and the render suspends in the middle
+// of a section — a composer on load.partials.aside yields, which is where a real render
+// hands the coroutine over. A stand whose only suspension is before the render proves
+// nothing about Blade: the renders run atomically and shared state looks isolated.
+//
+// The terminating callback is checked as well as the response, because it runs after the
+// body is built and reads the log context, which nothing in the body would show.
+app('view')->composer('load.partials.aside', fn () => \Async\suspend());
+
+$router->get('/render-load', function (Illuminate\Http\Request $request) {
+    $token = (string) $request->query('token', 'none');
+    $log   = dirname(__DIR__) . '/storage/render-load.log';
+
+    Illuminate\Support\Facades\Context::add('token', $token);
+    Illuminate\Support\Facades\Cookie::queue('probe', $token, 0, null, null, false, false);
+
+    app()->terminating(function () use ($token, $log) {
+        $seen = Illuminate\Support\Facades\Context::get('token');
+
+        // No LOCK_EX: five coroutines waiting on flock stop this build of the runtime
+        // (ASYNC_KNOWN_ISSUES.md §5). One short append is atomic on Linux without it.
+        file_put_contents($log, $token . ':' . $seen . "\n", FILE_APPEND);
+    });
+
+    return response()->view('load.page', [
+        'token' => $token,
+        'url'   => url()->full(),
     ]);
 });
 

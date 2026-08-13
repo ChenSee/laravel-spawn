@@ -5,9 +5,24 @@ namespace Spawn\Laravel\Tests;
 use Async\Scope;
 use PHPUnit\Framework\TestCase;
 use Spawn\Laravel\Foundation\AsyncApplication;
+use Spawn\Laravel\Foundation\FacadeCache;
 
 abstract class AsyncTestCase extends TestCase
 {
+    /**
+     * Facade caching is process state, and enableAsyncMode() switches it off for good.
+     * That is right for a worker, which never leaves async mode, and wrong for a test
+     * process, which runs one application after another: left off, every later test
+     * would resolve facades through the container and pass or fail on the order the
+     * suite happened to run in.
+     */
+    protected function tearDown(): void
+    {
+        FacadeCache::resumeCaching();
+
+        parent::tearDown();
+    }
+
     protected function createApp(): AsyncApplication
     {
         $app = new AsyncApplication(sys_get_temp_dir());

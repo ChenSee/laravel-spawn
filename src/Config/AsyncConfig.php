@@ -4,14 +4,13 @@ namespace Spawn\Laravel\Config;
 
 use Illuminate\Config\Repository;
 use Illuminate\Support\Arr;
-
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
  * Coroutine-safe Config Repository.
  *
  * Before bootCompleted(): behaves like stock Repository (writes to $items).
- * After bootCompleted(): set() writes to a per-coroutine overlay in current_context().
+ * After bootCompleted(): set() writes to the request's own overlay in RequestContext.
  * get() checks overlay first, then falls through to base $items.
  *
  * Base $items are immutable after boot — shared read-only across all coroutines.
@@ -34,7 +33,7 @@ class AsyncConfig extends Repository
             return;
         }
 
-        $ctx = current_context();
+        $ctx = RequestContext::current();
         $overlay = $ctx->find(self::CTX_KEY) ?? [];
 
         $keys = is_array($key) ? $key : [$key => $value];
@@ -56,7 +55,7 @@ class AsyncConfig extends Repository
             return $this->getMany($key);
         }
 
-        $overlay = current_context()->find(self::CTX_KEY);
+        $overlay = RequestContext::current()->find(self::CTX_KEY);
 
         if ($overlay !== null && Arr::has($overlay, $key)) {
             return Arr::get($overlay, $key);
@@ -86,7 +85,7 @@ class AsyncConfig extends Repository
             return parent::has($key);
         }
 
-        $overlay = current_context()->find(self::CTX_KEY);
+        $overlay = RequestContext::current()->find(self::CTX_KEY);
 
         if ($overlay !== null && Arr::has($overlay, $key)) {
             return true;
@@ -101,7 +100,7 @@ class AsyncConfig extends Repository
             return parent::all();
         }
 
-        $overlay = current_context()->find(self::CTX_KEY) ?? [];
+        $overlay = RequestContext::current()->find(self::CTX_KEY) ?? [];
 
         return array_replace_recursive($this->items, $overlay);
     }

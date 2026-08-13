@@ -182,6 +182,64 @@ services:
 
 ---
 
+## Per-request services
+
+A singleton lives as long as the worker and is shared by every request the worker is
+serving at that moment, so a service holding request state has to be declared
+per-request. The container gives every request its own instance, built on first resolve
+and kept in that request's coroutine context; its facade resolves per request as well.
+
+Three registrations declare one, and the container treats them alike.
+
+**Laravel's own `scoped()`** — the same call Octane packages already use:
+
+```php
+$this->app->scoped(TenantContext::class, fn ($app) => new TenantContext($app['request']));
+```
+
+**The config list**, for a package whose registration you do not control:
+
+```php
+// config/async.php
+'scoped_services' => [
+    \SomePackage\Manager::class,
+],
+```
+
+**`scopedSingleton()`**, when a shared binding has to stay in place: the factory here is
+used for the per-request build only, and whatever bootstrap resolved through the original
+binding stays reachable through `scopedPrototype()`. That is how this package scopes `url`
+without losing `URL::forceScheme()` and the other setters a provider called at boot.
+
+```php
+$this->app->scopedSingleton('url', function ($app) {
+    $url = clone $app->scopedPrototype('url');
+    $url->setRequest($app->make('request'));
+
+    return $url;
+});
+```
+
+**Per-request does not fit everything.** A service the framework or a package captures —
+kept in a static, taken in another singleton's constructor — must stay one object, or the
+capture pins one request's copy for the life of the worker. The view factory is the case:
+templates receive it as `$__env`, `Component::$factory` caches it, `MailManager` keeps it.
+It stays shared, and its render state moves into the request instead.
+
+**Boot-time configuration does not follow on its own.** A provider calling
+`Auth::extend()` or `Session::extend()` configures the boot-time instance, and a fresh
+per-request instance starts without it. Register a seeder to carry it across:
+
+```php
+$this->app->scopedSeeder('session', function ($fresh, $prototype) {
+    // copy what the provider registered on $prototype onto $fresh
+});
+```
+
+Turn on `async.diagnostics` to have the worker report, at start-up, every per-request
+service that bootstrap configured and no seeder carries over — and every shared service
+holding an object that belongs to one request.
+
 ## Configuration
 
 `config/async.php`:

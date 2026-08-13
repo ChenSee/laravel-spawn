@@ -2,12 +2,12 @@
 
 namespace Spawn\Laravel\Debugbar\Collectors;
 
-use function Async\current_context;
+use Spawn\Laravel\Foundation\RequestContext;
 
 /**
  * A collector subclass stays a single shared object (so it survives Debugbar's
  * instanceof checks and the one-time event subscription captures it), but routes
- * all accumulated data to a per-coroutine real collector kept in current_context().
+ * all accumulated data to a real collector kept in the request's context.
  *
  * The subclass supplies a factory (which also copies any shared configuration onto
  * the fresh per-request collector) and forwards its data methods through delegate().
@@ -27,7 +27,7 @@ trait DelegatesToContext
 
     protected function delegate(): object
     {
-        $ctx = current_context();
+        $ctx = RequestContext::current();
         $collector = $ctx->find($this->contextKey);
 
         if ($collector === null) {

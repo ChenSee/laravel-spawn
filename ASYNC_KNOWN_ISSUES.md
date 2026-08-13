@@ -10,60 +10,82 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 
 ## 0. Where things stand
 
-- Work is on `fix/24-scoped-boot-registrations`, open as **PR #29** against `master`.
-  149 tests, green, CI green.
-- Six findings are filed as **issues #30–#35** (table in §1). None is fixed.
-- The strategy is §6: one cause, and the moves in order. Move 2 is done; move 1 is
-  rejected, with the reasons. **Next is move 3 — the audit.**
+- Work is on `fix/24-scoped-boot-registrations`, which carries this change on top of
+  `master`; the branch's earlier work went in as PR #29 and the branch was rebuilt after
+  that merge. 206 tests, green, end-to-end included.
+- **Issues #30 to #35 are fixed** (table in §1), each with a test that fails without the
+  fix.
+- Of the strategy in §6: moves 3, 4 and 6 are done, move 5 was rejected in the shape the
+  plan gave it and each of its three items fixed separately, and move 1 stays rejected.
+- `php artisan async:audit` drives every parameterless GET route through a worker and
+  reports what each request leaves captured; `phpstan-framework.neon` points the static
+  half at `vendor/laravel`, where it reports four captures and nothing else — the URL
+  generator, the redirector, the response factory and `StartSession`, which is the
+  acceptance §6.3 asked for.
 
 ### Next, in order
 
-1. **Audit the singletons that capture a per-request service** (§6.3). List every
-   binding whose factory or constructor resolves one of the per-request aliases.
-   `StartSession` and `Redirector` were both found by accident; this turns that into a
-   procedure. Deliverable: the list, plus a PHPStan rule beside
-   `MutableStaticPropertyRule`. Acceptance: the rule flags `StartSession` as it was
-   written before #29.
-2. **#30 — facades.** Flush the facade cache between requests instead of extending
-   `FACADE_PROXIED_MAP`, which cannot be completed. Acceptance: `Cookie::queue()` in one
-   coroutine reaches that coroutine's response, with a test that fails without it.
-3. **#34, #35, rest of #33 — one per-request reset hook** shared by the three servers.
-4. **#31 — Blade render state** into the context, factory stays shared.
-5. The container contract gaps (§3) — only after the shape in §6.1 has a concurrency
+1. The container contract gaps (§3) — only after the shape in §6.1 has a concurrency
    harness behind it.
+2. §2 lists what the design cannot do. Removing one needs a different design rather than
+   a fix; three of the eight are not pinned by a test and say so.
 
 ### Working notes, so a cold start does not repeat today
 
-- Suite: `docker run --rm -v "$PWD":/app -w /app trueasync/php-true-async:latest php vendor/bin/phpunit --colors=never`
-- Benchmark: same, with `php tests/bench/bench_resolve.php 200000`
+- Suite: `php vendor/bin/phpunit --colors=never`, with `PHP_INI_SCAN_DIR` pointing at an
+  ini directory that loads `true_async_server.so` — without it the three end-to-end tests
+  fail on a missing `TrueAsync\HttpServerConfig`.
+- Benchmark: `php tests/bench/bench_resolve.php 200000`
+- **The local `/usr/local/bin/php` runs the whole suite.** It is PHP 8.6.0-dev ZTS DEBUG
+  with dom, xml, libxml and Phar, so PHPUnit and PHPStan both work; the older note saying
+  the build was `--disable-all` is wrong. Docker is not available in WSL here.
+- **`true_async_server.so` under the extension directory is stale** and dies with
+  `undefined symbol: _php_stream_cast` the moment it is used. Rebuild from
+  `/home/edmond/true-async-server`: `make clean && phpize && ./configure
+  --with-php-config=/usr/local/bin/php-config && make -j$(nproc)`, then point
+  `extension_dir` at `modules/`. Installing over the stale copy needs root.
 - **If `tests/StreamingE2ETest.php` fails with `Call to undefined function trueasync_response()`,
-  the autoloader is stale, not the image.** That function is defined in this package's own
+  the autoloader is stale, not the extension.** That function is defined in this package's own
   `src/helpers.php` and reaches PHP through composer's `autoload.files`. Regenerate:
   `composer dump-autoload` (CI installs from scratch, which is why CI never saw it).
-- The local `php-src` build cannot run the suite: it is configured `--disable-all`, so
-  there is no dom/xml/libxml for PHPUnit. Use the image.
-- PHPStan does not run locally either: no `Phar` extension in that build, and the image
-  times out on it. CI does not run it.
+- PHPStan on `src` reports 34 errors without `true_async_server` loaded and 9 with it: 4
+  `class.notFound` for `FrankenPHP\*`, 4 `classConstant.notFound` for `PDO::ATTR_POOL_*`,
+  and one Telescope `staticMethod.notFound`. They predate this work; CI does not run
+  PHPStan. Neither custom rule reports anything on `src`.
 - `Async\request_context()` is always `null` under PHPUnit — the server extension sets it.
   Anything that depends on it can only be checked end to end.
-- `redirect` cannot be proxied for its facade: `RoutingServiceProvider` passes
-  `$app['redirect']` to `ResponseFactory::__construct(Redirector $redirector)`. Tried;
-  TypeError. Same reason `cookie` is excluded.
+- A proxy must never be returned from `offsetGet()`: `RoutingServiceProvider` passes
+  `$app['redirect']` to `ResponseFactory::__construct(Redirector $redirector)` and
+  `AuthManager` passes `$app['cookie']` to `setCookieJar(QueueingFactory)`. The proxies
+  live in the facade cache instead, which nothing type-hints.
 - `AsyncTestCase::runParallel()` returns results in the order the coroutines were given,
   not the order they finished. A test comparing whole arrays would otherwise flake.
+- `Async\suspend()` is what makes an interleaving test deterministic. Two coroutines that
+  never suspend run one after the other, and a test written without it passes on shared
+  state as happily as on isolated state.
+- **A load stand is not the same as the suite, and it proves less than a clean run
+  suggests.** Sixty concurrent requests against a real `async:serve`, each carrying its own
+  token through Blade, the cookie jar, `Vite`, the log context and a terminating callback,
+  found a leak every unit test had missed: the request facade after a suspension point.
+  Nothing else came back mixed — but the stand's only suspension was *before* the render,
+  so the renders ran atomically and it could not have distinguished shared Blade state
+  from isolated. A stand that tests the render needs the suspension **inside** it: a view
+  composer that yields within an `@include`, a component with a slot, `@once` in two
+  includes. It also has to read what it collects — the terminating-callback log was
+  written by the route and never checked by the script.
 
 ---
 
-## 1. Filed as issues
+## 1. Filed as issues, and how each was closed
 
-| # | What | Worst outcome |
-|---|---|---|
-| [#30](https://github.com/YanGusik/laravel-spawn/issues/30) | Facades of scoped services pin the first coroutine's instance (`Cookie`, `Socialite`, `Request`) | Login as another user through Socialite; queued cookies silently lost |
-| [#31](https://github.com/YanGusik/laravel-spawn/issues/31) | Blade render state (`@section`, `@push`, components) is shared | Two responses' HTML mixed |
-| [#32](https://github.com/YanGusik/laravel-spawn/issues/32) | `UrlGenerator` is shared and overwritten per request | `url()->current()`, `redirect()->back()`, `asset()` answer for another request |
-| [#33](https://github.com/YanGusik/laravel-spawn/issues/33) | Laravel's own `scoped()` singletons were never flushed | *Container half fixed in #29*; `defer()` path still unverified |
-| [#34](https://github.com/YanGusik/laravel-spawn/issues/34) | Terminating callbacks accumulate and re-run | Side effect repeats N times on the Nth request; unbounded growth |
-| [#35](https://github.com/YanGusik/laravel-spawn/issues/35) | `Vite` holds CSP nonce and preloaded assets on a shared singleton | Blank page under CSP; `Link: rel=preload` grows forever |
+| # | What | Fix | Test |
+|---|---|---|---|
+| [#30](https://github.com/YanGusik/laravel-spawn/issues/30) | Facades of scoped services pin the first coroutine's instance (`Cookie`, `Socialite`, `Request`) | Caching switched off with async mode, so a facade always asks the container and the container answers per coroutine; a `ScopedServiceProxy` per per-request alias on top, as the fast path | `CookieIsolationTest`, `FacadeRestoreTest` |
+| [#31](https://github.com/YanGusik/laravel-spawn/issues/31) | Blade render state (`@section`, `@push`, components) is shared | The factory stays one object and its sixteen render properties move into the request's context, so unmodified framework code writes per request. Tests cover sections, `@push`, `@once` and a suspended `@include`; `<x-component>` and slots go through the same properties but are not driven by a test | `BladeRenderE2ETest`, `BladeRenderIsolationTest`, `ViewRenderStateTest` |
+| [#32](https://github.com/YanGusik/laravel-spawn/issues/32) | `UrlGenerator` is shared and overwritten per request | `url` and the response factory are per-request; `rebinding()` inside a per-request factory is dropped instead of accumulating | `UrlIsolationTest` |
+| [#33](https://github.com/YanGusik/laravel-spawn/issues/33) | Laravel's own `scoped()` singletons were never flushed | Container half in #29; a seeder now carries boot-time log context into each request | `RequestLifecycleIsolationTest` |
+| [#34](https://github.com/YanGusik/laravel-spawn/issues/34) | Terminating callbacks accumulate and re-run | The list belongs to the request, in its context; the container keeps only what bootstrap registered | `RequestLifecycleIsolationTest` |
+| [#35](https://github.com/YanGusik/laravel-spawn/issues/35) | `Vite` holds CSP nonce and preloaded assets on a shared singleton | Per-request clone of the boot-time object, render state emptied | `RequestLifecycleIsolationTest` |
 
 ### The one pattern behind half of them
 
@@ -84,25 +106,64 @@ than any single fix here.**
 
 ## 2. Limitations inside the design, pinned by tests
 
-These are consequences of how scoping works, not oversights. Each has a test asserting
-the current behaviour, so a future change that removes the limitation fails visibly.
+These are consequences of how scoping works, not oversights. Where a test asserts the
+current behaviour it is named, and a future change that removes the limitation fails
+visibly; where none is named, nothing will notice the change but a reader.
 
 1. **`use`-captured state in an adopted registration.** Re-binding fixes `$this` and
    nothing else. A creator written as `Auth::extend('x', function () use ($manager) {…})`
    keeps resolving against the manager it captured, in every coroutine.
-   `tests/AuthLimitationsTest.php` asserts the broken behaviour and says so.
+   `tests/AuthLimitationsTest.php` asserts the broken behaviour, and the re-bound form
+   beside it, so the difference between the two is visible.
    Registrations made through `Auth::resolved()` — the form real Sanctum uses — are
    correctly isolated, because `afterResolving` runs after the seeder.
-2. **A registration made after serving begins reaches one coroutine.** Prototypes are
+2. **The configured list of per-request services is read for the last time at
+   `enableAsyncMode()`.** A deferred provider that merges its own entries into
+   `async.scoped_services` while serving is never seen; before the latch it was, at the
+   cost of a config read on every resolve that missed. Not pinned by a test.
+3. **A registration made after serving begins reaches one coroutine.** Prototypes are
    captured once, at `enableAsyncMode()`. A deferred provider loaded inside a request is
    the usual way to hit this: it is marked loaded and never registers again.
-3. **`scopedSingleton()` services have no prototype**, so a seeder for one never runs —
+4. **`scopedSingleton()` services have no prototype**, so a seeder for one never runs —
    there is no boot-time instance by definition.
-4. **A seeder only runs for an alias the container treats as scoped.** On any other
+5. **A seeder only runs for an alias the container treats as scoped.** On any other
    alias it is silently never called.
-5. **Facades of scoped aliases outside `FACADE_PROXIED_MAP`** are pinned. `enableAsyncMode()
-   clears only the proxied ones, deliberately: clearing the rest would trade a pinned
-   boot-time instance for a pinned instance of the first coroutine, which is worse. See #30.
+6. **A facade of an alias that becomes per-request after start-up** is proxied from the
+   moment the container learns of it, not from the moment the facade first resolved. An
+   instance the facade cached before that — a deferred provider calling `scoped()` on an
+   alias a facade had already touched — stays until something overwrites it.
+7. **A facade root of a per-request alias answers `__call`, `__get`, `__set` and
+   `__isset`, and nothing else.** `ScopedServiceProxy` is not callable, not stringable,
+   not countable and not traversable, so `(Vite::getFacadeRoot())(…)` or `count(Foo::…)`
+   through such a facade fails. Nothing in the per-request set is used that way — the
+   `@vite` directive resolves through the container, not the facade — and the methods can
+   be added when something needs them.
+8. **`Facade::clearResolvedInstances()` while serving removes the proxies.** Nothing in
+   the package calls it after start-up. The singular `clearResolvedInstance('request')`,
+   which `Illuminate\Foundation\Http\Kernel` calls on every request, is put back by
+   `RestorePerRequestFacades`, the first middleware in the pipeline — including when a
+   coroutine got in first and left its own instance in the slot, which is why the check
+   is for the proxy rather than for the slot being occupied. A test harness that clears
+   the whole array has to enable async mode again, or its facades go back to pinning the
+   first coroutine's instance.
+9. **The tracing JIT loses `isset()` on a moved property, and the factory works around
+   it.** `isset($this->sections[$name])` reads a dimension of a property the factory does
+   not have, so the engine goes through `__isset()` and `__get()`; under
+   `opcache.jit=tracing` that path answers false for a key the array holds. Measured in
+   `trueasync/php-true-async:latest`: four of sixty concurrent pages emitted an `@once`
+   block twice, and a fifty-line script without Laravel reproduces it eight times a run
+   (`opcache.jit=off` and opcache off are both clean). Filed as
+   [true-async/php-async#223](https://github.com/true-async/php-async/issues/223). The
+   eight framework methods that ask this way are overridden in `AsyncViewFactory` to fetch
+   the array first, which always answers correctly; the price is eight method bodies
+   copied from upstream, which an upgrade can silently make stale.
+10. **`Cookie::shouldReceive()` in async mode mocks the proxy, not the service.**
+   `Facade::getMockableClass()` returns `get_class(static::getFacadeRoot())`, and the root
+   of a per-request facade is a `ScopedServiceProxy`, so the mock carries that class and
+   satisfies no type-hint the real service would. It reaches tests only: a worker is the
+   only thing that turns async mode on, and `artisan test` does not. Not pinned by a
+   test — Mockery is not installed here, and pulling it in for this alone is not worth a
+   dependency.
 
 ---
 
@@ -135,6 +196,15 @@ and an explicit `instance()` outranks scoping.
 - **Pool mode (`workers > 1`)** cannot be stopped from the parent (upstream
   true-async/server#117), so a test would leave a process behind. The failure mode it
   would catch is static state, which the two-applications-in-one-process test covers.
+- **Whether `TrueAsyncServer` should warm the PDO pool.** `DevServer` calls
+  `warmUpDatabasePool()` from inside its server coroutine, `FrankenPhpServer` documents why
+  it must not — before the scheduler runs, warming hangs — and `TrueAsyncServer` calls it
+  nowhere, so its pool is created lazily in whichever request coroutine touches the database
+  first. `ManagesDatabasePool` says such a pool is scoped to a short-lived coroutine and
+  destroyed between requests; the changelog says a worker must warm it. Which side
+  `TrueAsyncServer`'s bootloader falls on is unestablished: it runs in the worker thread
+  before `HttpServer::start()`, and telling a warm-up from a hang there needs a database and
+  concurrent requests. There is no database on this machine.
 - **Object lifetime** — "a guard does not outlive its request" — is unobservable:
   `runParallel()` never disposes its scopes, so a `WeakReference` stays alive on any
   branch. Accumulation is asserted through the container's own counters instead.
@@ -147,6 +217,30 @@ and an explicit `instance()` outranks scoping.
 the image loads `true_async_server` but has no `trueasync_response()`, which
 `src/Sse/Sse.php:19` calls. CI uses `:latest`, where it exists. Not a code defect, and it
 fails identically on `master`.
+
+### `LOCK_EX` from five coroutines stops the worker
+
+`file_put_contents($path, $data, FILE_APPEND | LOCK_EX)` from five or more coroutines at
+once ends the process's useful life: nothing is written, no call returns, and nothing else
+is served either. Four at once always finish. The threshold is `UV_THREADPOOL_SIZE`, which
+defaults to 4: `flock()` was offloaded to the libuv pool and a waiting task held its
+thread, and reads and writes of a regular file are `uv_fs` requests on the same pool, so
+the holder's own write had no thread left and the lock was never released.
+
+**Fixed in the runtime**, [true-async/php-async#221](https://github.com/true-async/php-async/issues/221)
+by [php-src#18](https://github.com/true-async/php-src/pull/18): the wait happens on the
+coroutine now, `flock(LOCK_NB)` and a timer. The note stays because the fix is on
+`true-async-stable` and in no release yet — a worker built before it still stops, and the
+twenty-line reproduction in the issue says in a second which build is in use.
+
+**It reaches an application through the shipped defaults.** `Filesystem::put($path, $data,
+true)` passes `LOCK_EX`, and both `FileSessionHandler::write()` and `FileStore::put()` call
+it that way, so a worker on `SESSION_DRIVER=file` or `CACHE_STORE=file` stops under five
+concurrent writes. Read from the framework source, not reproduced through a server. Log
+channels are safe: `single` and `daily` default to `'locking' => false`.
+
+The render-load stand appends without a lock for this reason, and one short append per
+request is atomic on Linux anyway.
 
 ---
 
@@ -188,29 +282,71 @@ map of alias to context key, kept current rather than snapshotted. Measured on t
 benchmark below: a per-request resolve went from 212 ns to 117 ns, because the check
 cost more than the work it guarded.
 
-**3. Make "a singleton captured a per-request object" impossible to miss.** At worker
-start, walk the resolved singletons and report any holding a reference to a per-request
-object; add a PHPStan rule, beside the existing `MutableStaticPropertyRule`, for a
-constructor parameter typed as one. This is the only measure that covers third-party
-code nobody has read.
+**3. Make "a singleton captured a per-request object" impossible to miss — done.** Two
+halves, because neither covers the other. `SingletonCapturesPerRequestRule` reads
+`singleton()` registrations before the code runs and needs no application; pointed at
+`vendor/laravel` through `phpstan-framework.neon` it reports the URL generator taking the
+request, the redirector taking the generator, the response factory taking the redirector
+and `StartSession` taking the session manager — four, all real, nothing else in the whole
+of Illuminate. It sees only what a constructor signature says.
 
-**4. Facades: stop caching rather than proxy.** `FACADE_PROXIED_MAP` cannot be completed:
-a service passed to a typed parameter cannot be a proxy, which is why `cookie` and
-`redirect` are excluded — `RoutingServiceProvider` hands `$app['redirect']` to
-`ResponseFactory::__construct(Redirector $redirector)`. Flushing the facade cache between
-requests, as Octane does, needs no list of names at all. Delegating subclasses stay only
-where a real type is required.
+`PerRequestCaptureAudit` reads objects instead, so it catches a capture made by a setter,
+an array element or an `extend()`. It can only report objects that exist, and at worker
+start almost nothing per-request does — Laravel builds `url`, the response factory and
+every singleton middleware on the first request that needs one. `async:audit` is
+therefore the delivery: it puts the application in a worker's state, drives every
+parameterless GET route, and collects the findings inside each request's own scope. The
+report at `enableAsyncMode()` stays as well, because it is free and it catches a capture
+made during bootstrap.
 
-**5. One per-request reset hook (#33, #34, #35).** Terminating callbacks, `Vite`,
-`Context`, deferred callbacks — one shape, one list the servers flush between requests,
-and a place for packages to add to it.
+The walk sees properties and array elements. Statics, closures and anything behind a
+resource are outside it by construction, so an empty result means clean as far as it
+looks, not safe.
 
-**6. Blade render state (#31).** The only item where an application sees corrupt output
-rather than wrong data. The factory stays shared; the render stack moves into the
-context, which is the existing adapter pattern taken to its end.
+**4. Facades: a proxy in the cache, not a shorter list — done.** `FACADE_PROXIED_MAP` was
+deleted. Every per-request alias gets a `ScopedServiceProxy` written into
+`Facade::$resolvedInstance` at start-up and whenever the container learns of a new one, so
+the completeness problem disappears: the list is the container's own map of per-request
+aliases. `offsetGet()` returns real objects again, which is what makes it safe for
+`redirect` and `cookie` — both are passed to typed constructor parameters, and neither
+was proxyable under the old shape.
 
-Order: 3 next — it buys the most insight per line. Then 4, 5, 6. The container contract
-gaps in §3 stay until the shape in 1 is proven on a concurrency harness.
+**5. One per-request reset hook (#33, #34, #35) — rejected, and why.** A hook that resets
+process state between requests is correct only where requests do not overlap. Here they
+do: clearing the terminating callbacks would drop the callbacks of a request still in
+flight, `Vite::flush()` would empty the preloaded assets another coroutine is collecting,
+and `forgetScopedInstances()` would destroy another request's log context. Octane can
+reset because it serves one request at a time per worker. Each of the three was made
+per-request instead: the callbacks live in the request's context, `Vite` is a clone of the
+boot-time object, and Laravel's `scoped()` already answers per request, with a seeder now
+carrying the boot-time log context in.
+
+**6. Blade render state (#31) — done, and the factory stayed shared after all.** The first
+attempt made `view` per-request by cloning the boot-time factory. It was wrong twice over.
+`Factory::__construct` does `share('__env', $this)`, so every compiled template renders
+against whatever object was constructed — the prototype — while the clone was only reached
+by direct calls on `$app->make('view')`, which is all the first tests did. And a
+per-request factory creates the very pattern this package exists to remove:
+`Component::$factory` is a process static filled on first use, `MailManager` and
+`Markdown` take the factory in their constructors, so the first request to render a
+component or send a mail pins its copy for the life of the worker.
+
+What ships is the plan's original shape, with an implementation that does not cost fifty
+method overrides. The sixteen render properties are `unset()` from the object in the
+constructor, so every read and write the inherited traits make falls through `&__get()`
+and `__set()` into a `BladeRenderState` held in the request's context. `&__get()` returns
+by reference, which is what lets unmodified code run `array_pop($this->sectionStack)`.
+An upgrade adding a *method* is handled automatically; an upgrade adding a *property* is
+caught by `ViewRenderStateTest`, which fails on any property of `Illuminate\View\Factory`
+that is in neither the moved list nor the configuration list.
+
+**The rule this leaves behind.** Clone-per-request is correct for a service nothing
+long-lived captures — `Vite` is resolved through the container at each use, so it is a
+clone. A service the ecosystem captures by reference must stay one object with its state
+moved into the request. That is why `Vite` and `view` are treated differently.
+
+Next: the two halves of 3 that are not yet pointed at anything (§0). The container
+contract gaps in §3 stay until the shape in 1 is proven on a concurrency harness.
 
 **Not on this list:** the design limitations in §2. They are pinned by tests and
 documented; removing them needs a different design, not a fix.

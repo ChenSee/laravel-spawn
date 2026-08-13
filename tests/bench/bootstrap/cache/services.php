@@ -7,7 +7,9 @@
     3 => 'Illuminate\\Log\\LogServiceProvider',
     4 => 'Illuminate\\Translation\\TranslationServiceProvider',
     5 => 'Illuminate\\Routing\\RoutingServiceProvider',
-    6 => 'Spawn\\Laravel\\AsyncServiceProvider',
+    6 => 'Illuminate\\Cookie\\CookieServiceProvider',
+    7 => 'Illuminate\\Log\\Context\\ContextServiceProvider',
+    8 => 'Spawn\\Laravel\\AsyncServiceProvider',
   ),
   'eager' => 
   array (
@@ -15,7 +17,9 @@
     1 => 'Illuminate\\Filesystem\\FilesystemServiceProvider',
     2 => 'Illuminate\\Log\\LogServiceProvider',
     3 => 'Illuminate\\Routing\\RoutingServiceProvider',
-    4 => 'Spawn\\Laravel\\AsyncServiceProvider',
+    4 => 'Illuminate\\Cookie\\CookieServiceProvider',
+    5 => 'Illuminate\\Log\\Context\\ContextServiceProvider',
+    6 => 'Spawn\\Laravel\\AsyncServiceProvider',
   ),
   'deferred' => 
   array (

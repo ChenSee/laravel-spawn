@@ -1,0 +1,51 @@
+# Runs SingletonCapturesPerRequestRule over the framework instead of over this package.
+#
+# The rule exists for code nobody in this project has read, and phpstan.neon points at
+# `src`, where there is nothing to find by construction. Point an application's copy of
+# this file at its own `app/` and at the packages it installs.
+#
+#   php vendor/bin/phpstan analyse -c phpstan-framework.neon
+#
+# Against laravel/framework 12 it reports four, all of them real and all of them the
+# subject of this work: UrlGenerator taking the request, Redirector taking the generator,
+# ResponseFactory taking the redirector, and StartSession taking the session manager.
+#
+# Everything the rule does not report is silenced: the framework is analysed without its
+# own dependencies resolved, so the type errors here belong to the setup, not to Laravel.
+parameters:
+    level: 0
+    # One process: a parallel worker dies in PHP shutdown under the TrueAsync build
+    # ("Shutdown destructors coroutine was not finished"), which aborts the whole run.
+    parallel:
+        maximumNumberOfProcesses: 1
+    paths:
+        - vendor/laravel/framework/src/Illuminate
+    excludePaths:
+        # Needs paratest, which is optional and not installed here.
+        - vendor/laravel/framework/src/Illuminate/Testing/ParallelRunner.php
+    customRulesetUsed: true
+    reportUnmatchedIgnoredErrors: false
+    ignoreErrors:
+        - identifier: class.notFound
+        - identifier: classConstant.notFound
+        - identifier: function.notFound
+        - identifier: method.notFound
+        - identifier: staticMethod.notFound
+        - identifier: property.notFound
+        - identifier: trait.notFound
+        - identifier: interface.notFound
+        - identifier: instanceof.internalClass
+        - identifier: new.static
+        # Level-0 noise from the framework's own style, none of it this rule's subject.
+        - identifier: method.void
+        - identifier: staticMethod.void
+        - identifier: return.missing
+        - identifier: unset.possiblyHookedProperty
+
+services:
+    -
+        class: Spawn\Laravel\PHPStan\SingletonCapturesPerRequestRule
+        arguments:
+            perRequestTypes: []
+        tags:
+            - phpstan.rules.rule

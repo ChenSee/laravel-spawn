@@ -95,6 +95,18 @@ $main = spawn(static function () use ($autoload, $bootstrap, $host, $port, &$exi
         ($first['shared'] ?? false) === true
     );
 
+    // The adapters answer through the same context as the container, so a config
+    // overlay and a locale written by the nested coroutine reach the response.
+    $check(
+        'request-scope: the config overlay written inside the coroutine reaches the handler',
+        ($first['config_shared'] ?? false) === true
+    );
+
+    $check(
+        'request-scope: so does the locale',
+        ($first['locale_shared'] ?? false) === true
+    );
+
     [, $body] = $get('/request-scope');
     $second = json_decode($body, true);
 

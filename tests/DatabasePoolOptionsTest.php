@@ -3,14 +3,14 @@
 namespace Spawn\Laravel\Tests;
 
 use Illuminate\Config\Repository;
-use Illuminate\Contracts\Foundation\Application;
 use PDO;
 use Spawn\Laravel\Foundation\AsyncApplication;
-use Spawn\Laravel\Server\Concerns\ManagesDatabasePool;
+use Spawn\Laravel\Foundation\WorkerBootstrap;
 
 /**
- * The pool options that DevServer and FrankenPhpServer inject through
- * ManagesDatabasePool: the same conversion TrueAsyncServer does for workers.
+ * The pool options every worker injects on its way to its first request.
+ *
+ * One place injects them for all three servers, so the conversion is checked once.
  */
 class DatabasePoolOptionsTest extends AsyncTestCase
 {
@@ -23,20 +23,7 @@ class DatabasePoolOptionsTest extends AsyncTestCase
             'database' => ['connections' => ['mysql' => ['driver' => 'mysql']]],
         ]));
 
-        $server = new class ($app) {
-            use ManagesDatabasePool;
-
-            public function __construct(private readonly Application $app)
-            {
-            }
-
-            public function configure(): void
-            {
-                $this->configureDatabasePool();
-            }
-        };
-
-        $server->configure();
+        WorkerBootstrap::run($app);
 
         return $app->make('config')->get('database.connections.mysql.options') ?? [];
     }
