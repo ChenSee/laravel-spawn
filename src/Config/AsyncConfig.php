@@ -58,7 +58,14 @@ class AsyncConfig extends Repository
         $overlay = RequestContext::current()->find(self::CTX_KEY);
 
         if ($overlay !== null && Arr::has($overlay, $key)) {
-            return Arr::get($overlay, $key);
+            $base = Arr::get($this->items, $key);
+            $override = Arr::get($overlay, $key);
+
+            if (is_array($base) && is_array($override)) {
+                return array_replace_recursive($base, $override);
+            }
+
+            return $override;
         }
 
         return Arr::get($this->items, $key, $default);
