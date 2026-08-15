@@ -6,6 +6,8 @@ use Illuminate\Config\Repository;
 use Illuminate\Support\Arr;
 use Spawn\Laravel\Foundation\RequestContext;
 
+use function Async\root_context;
+
 /**
  * Coroutine-safe Config Repository.
  *
@@ -21,9 +23,15 @@ class AsyncConfig extends Repository
 
     private bool $async = false;
 
+    private bool $diagnostics = false;
+
     public function bootCompleted(): void
     {
-        $this->async = true;
+        // Cached here rather than read inside set(): a coroutine that writes this very
+        // key would otherwise turn the report off for its own writes, and the lookup
+        // would repeat on every write for a setting that cannot change after boot.
+        $this->diagnostics = (bool) $this->get('async.diagnostics', false);
+        $this->async       = true;
     }
 
     public function set($key, $value = null)
@@ -37,6 +45,10 @@ class AsyncConfig extends Repository
         $overlay = $ctx->find(self::CTX_KEY) ?? [];
 
         $keys = is_array($key) ? $key : [$key => $value];
+
+        if ($this->diagnostics && $ctx === root_context()) {
+            $this->reportRootContextWrite(array_keys($keys));
+        }
 
         foreach ($keys as $k => $v) {
             Arr::set($overlay, $k, $v);
@@ -110,5 +122,18 @@ class AsyncConfig extends Repository
         $overlay = RequestContext::current()->find(self::CTX_KEY) ?? [];
 
         return array_replace_recursive($this->items, $overlay);
+    }
+
+    /**
+     * @param  string[]  $keys
+     */
+    private function reportRootContextWrite(array $keys): void
+    {
+        // The only readers of such a write are worker-level coroutines that share the
+        // root context.
+        error_log(
+            "[async] config write from the root context: '" . implode("', '", $keys)
+            ."'; requests run in their own scope and read the base configuration instead"
+        );
     }
 }

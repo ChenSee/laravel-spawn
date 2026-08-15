@@ -52,6 +52,12 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
   `class.notFound` for `FrankenPHP\*`, 4 `classConstant.notFound` for `PDO::ATTR_POOL_*`,
   and one Telescope `staticMethod.notFound`. They predate this work; CI does not run
   PHPStan. Neither custom rule reports anything on `src`.
+- **A test that binds a stock `Illuminate\Config\Repository` cannot see a mode bug.**
+  `WorkerBootstrap` recognises the adapters by `instanceof`, so a stock repository skips
+  `bootCompleted()` and writes to the shared array whatever the order of start-up. That is
+  how #45 passed its own test for two releases. The same goes for reading back: a value
+  written in async mode is visible to the coroutine that wrote it, and a test that asserts
+  from there asserts nothing — read from a coroutine in a scope of its own.
 - `Async\request_context()` is always `null` under PHPUnit — the server extension sets it.
   Anything that depends on it can only be checked end to end.
 - A proxy must never be returned from `offsetGet()`: `RoutingServiceProvider` passes
@@ -86,6 +92,7 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 | [#33](https://github.com/YanGusik/laravel-spawn/issues/33) | Laravel's own `scoped()` singletons were never flushed | Container half in #29; a seeder now carries boot-time log context into each request | `RequestLifecycleIsolationTest` |
 | [#34](https://github.com/YanGusik/laravel-spawn/issues/34) | Terminating callbacks accumulate and re-run | The list belongs to the request, in its context; the container keeps only what bootstrap registered | `RequestLifecycleIsolationTest` |
 | [#35](https://github.com/YanGusik/laravel-spawn/issues/35) | `Vite` holds CSP nonce and preloaded assets on a shared singleton | Per-request clone of the boot-time object, render state emptied | `RequestLifecycleIsolationTest` |
+| [#45](https://github.com/YanGusik/laravel-spawn/issues/45) | The PDO pool is never enabled: worker start-up wrote the pool options through an already switched `AsyncConfig`, so requests read the base configuration and shared one connection | Start-up has two phases — configure, then switch — and the pool options are written in the first; the purge covers every connection bootstrap opened, not the default alone | `DatabasePoolOptionsTest`, `WorkerBootstrapOrderTest` |
 
 ### The one pattern behind half of them
 

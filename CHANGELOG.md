@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
+- The PDO pool was never enabled, so every coroutine in a worker shared one connection and concurrent requests failed with `SQLSTATE[HY000] 2014 Cannot execute queries while other unbuffered queries are active` (#45). Worker start-up wrote the pool options after switching the config adapter to per-request mode, which kept them in an overlay no request reads; it now configures everything before it switches anything
+- Connections other than the default kept their unpooled PDO for the life of the worker: start-up purged the default connection alone
 - Facades of per-request services answered the first coroutine that touched them (#30) — `Cookie::queue()` queued into another request's jar. Every per-request alias has a `ScopedServiceProxy` in the facade cache, `RestorePerRequestFacades` puts back the `request` entry the kernel drops on every request, and facade caching is off while async mode is on
 - Blade render state was shared between concurrent renders (#31) — two responses wrote into one set of sections, and one render's nesting counter reaching zero emptied the other's mid-page. The sixteen render properties moved into the request's context; the factory stays one object, because `$__env` and `Component::$factory` hold it
 - `UrlGenerator` answered for whichever request rebound `request` last (#32), so `url()->current()` and `redirect()->back()` could name another request's URL. `url` and the response factory are per-request, cloned from the boot-time objects so a provider's `URL::forceScheme()` survives
@@ -19,6 +21,7 @@
 - `perRequestKey()` stops re-reading `config('async.scoped_services')` once async mode is on. With the shipped default of an empty list the read fired on every resolve that was not per-request
 
 ### Added
+- Under `async.diagnostics`, a config write from the root context is reported: the value stays in the root context's own overlay, the base configuration is unchanged, and every request reads that. A write from a coroutine in a scope of its own is equally lost and is not reported: start-up code writes from the root context
 - `run_render_load.php` (`RenderLoadE2ETest`) — sixty concurrent requests against a real `TrueAsyncServer`, each carrying its own token through the sections, `@push`, `@once`, a component slot, the cookie jar, the URL generator and a terminating callback, with the render suspending inside an `@include`. Make the render state shared again and every page comes back holding four other requests' tokens
 - `bench_render.php` — what the per-request render state costs a page, priced against the stock factory and against a process-wide state
 - `PerRequestCaptureAudit` — walks the resolved singletons and reports any holding an object that belongs to one request, the shape behind `StartSession` and `Redirector`. Runs at worker start under `async.diagnostics`; `AsyncApplication::perRequestCaptures()` returns the same findings to a caller
