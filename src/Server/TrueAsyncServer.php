@@ -301,7 +301,7 @@ class TrueAsyncServer implements ServerInterface
             $request->getPost(),
             [],
             $this->parseCookies($request),
-            $request->getFiles(),
+            UploadedFiles::convert($request->getFiles()),
             $server,
             $request->getBody()
         );
