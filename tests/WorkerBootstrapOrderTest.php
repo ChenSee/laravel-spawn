@@ -9,12 +9,8 @@ use Spawn\Laravel\Foundation\AsyncApplication;
 use Spawn\Laravel\Foundation\WorkerBootstrap;
 
 /**
- * The invariants that decide where a new start-up step may go.
- *
- * Worker start-up has two phases: everything that configures the worker, and then the
- * switches that put the adapters and the container into per-request mode. The tests
- * here pin what the split is for — a write in the second phase reaches no request —
- * so that the pool options, and anything configured next to them, keep arriving.
+ * The invariants that decide where a new start-up step may go: what a switched adapter
+ * does to a write, and what start-up is therefore forbidden to do after switching one.
  */
 class WorkerBootstrapOrderTest extends AsyncTestCase
 {
@@ -40,14 +36,11 @@ class WorkerBootstrapOrderTest extends AsyncTestCase
     }
 
     /**
-     * The invariant a new start-up step has to keep: nothing writes configuration once
-     * the config adapter is switched.
+     * The invariant a start-up step nobody has written yet has to keep: no configuration
+     * is written once the config adapter is switched.
      *
-     * The pool options are the only configuration start-up writes today, so the test
-     * that follows their delivery covers exactly them. This one covers the step nobody
-     * has written yet — put it in the wrong phase and its value goes, with no error, to
-     * an overlay no request reads. It watches the config adapter alone, so a step that
-     * loses its state through one of the other six switched adapters passes it.
+     * It watches that adapter alone, so a step losing its state through one of the other
+     * six passes.
      */
     public function test_start_up_writes_no_configuration_after_the_config_adapter_switches(): void
     {
@@ -62,12 +55,8 @@ class WorkerBootstrapOrderTest extends AsyncTestCase
     }
 
     /**
-     * The switch the second phase performs, seen from both sides: the worker keeps its
-     * own value and no request reads it.
-     *
-     * This is why configuration goes first, and it is also what makes the pool test in
-     * DatabasePoolOptionsTest mean anything — an unswitched config would deliver the
-     * options whatever the order.
+     * The switch seen from both sides: the writer keeps its own value and no request
+     * reads it. Without it, DatabasePoolOptionsTest would pass whatever the order.
      */
     public function test_a_config_write_after_start_up_stays_with_the_writer(): void
     {
@@ -89,14 +78,12 @@ class WorkerBootstrapOrderTest extends AsyncTestCase
     }
 
     /**
-     * Every connection bootstrap opened is purged, not the default one alone.
-     *
-     * A connection built before the pool options is unpooled and would be handed to
-     * coroutine after coroutine; DatabaseManager::purge() without a name reaches only
-     * the default connection, which leaves a second one shared for the worker's life.
+     * Every connection bootstrap opened is purged, not the default one alone: a
+     * connection built before the pool options is unpooled and would be handed to
+     * coroutine after coroutine.
      *
      * The manager is the real one, because the claim under test is about it: that it
-     * keys its connections by name and takes those keys back in purge().
+     * keys connections by name and takes those keys back in purge().
      */
     public function test_every_connection_opened_during_bootstrap_is_purged(): void
     {
@@ -149,10 +136,7 @@ class WorkerBootstrapOrderTest extends AsyncTestCase
     }
 }
 
-/**
- * A config that remembers what was written to it once it stopped writing to the shared
- * array — which is what a start-up step in the wrong phase looks like from here.
- */
+/** A config that remembers what was written to it once it stopped writing to the shared array. */
 class RecordingConfig extends AsyncConfig
 {
     /** @var string[] */

@@ -30,9 +30,7 @@ class WorkerInitializationTest extends AsyncTestCase
     }
 
     /**
-     * The options as a request coroutine sees them, which is the only reader that
-     * matters: it inherits nothing from the coroutine that started the worker, so a
-     * write kept in that coroutine's own overlay reads back as null here.
+     * The options as a request coroutine sees them, which is the only reader that counts.
      *
      * @return array<int, mixed>|null
      */

@@ -67,12 +67,9 @@ class DatabasePoolOptionsTest extends AsyncTestCase
     }
 
     /**
-     * The reader of these options is a request coroutine, and it inherits nothing from
-     * the coroutine that started the worker.
-     *
-     * Written after the config adapter is switched, they are kept in the writing
-     * coroutine's overlay: the connection factory then reads the base configuration,
-     * finds no pool, and every coroutine in the worker shares one PDO handle.
+     * The reader of these options is a request coroutine, which inherits nothing from
+     * the coroutine that started the worker: written after the switch, they read back as
+     * null here, and every coroutine in the worker then shares one PDO handle.
      */
     public function test_the_options_reach_a_request_coroutine(): void
     {
