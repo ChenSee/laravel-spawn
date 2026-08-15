@@ -181,6 +181,15 @@ visibly; where none is named, nothing will notice the change but a reader.
    only thing that turns async mode on, and `artisan test` does not. Not pinned by a
    test — Mockery is not installed here, and pulling it in for this alone is not worth a
    dependency.
+11. **A connection the pool cannot take throws on its first query, and that is the
+   intended outcome.** `PDO::ATTR_POOL_ENABLED` is refused for `PDO::ATTR_PERSISTENT`
+   (`ext/pdo/pdo_dbh.c`), for a driver that does not implement pooling — `odbc`, `dblib`
+   and `firebird` do not, which covers `sqlsrv` on most builds — and for a private
+   in-memory SQLite database. Start-up puts the options on every configured connection
+   without asking, so such a connection reports the refusal instead of quietly serving
+   one shared handle to every coroutine. Persistent connections are not supported under
+   async serving in the first place: one connection shared across coroutines is the
+   defect the pool exists to prevent.
 
 ---
 
