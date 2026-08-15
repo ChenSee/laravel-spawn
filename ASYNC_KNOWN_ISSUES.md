@@ -52,6 +52,16 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
   `class.notFound` for `FrankenPHP\*`, 4 `classConstant.notFound` for `PDO::ATTR_POOL_*`,
   and one Telescope `staticMethod.notFound`. They predate this work; CI does not run
   PHPStan. Neither custom rule reports anything on `src`.
+- **Which coroutine reads the root context, measured.** `Async\spawn()` and
+  `Scope::inherit()` taken from the root both reach it; a coroutine of a `new Scope()`
+  does not. A request under `TrueAsyncServer` does not either — probed against a live
+  one-worker server, where the handler's `request_context()->find()` and
+  `current_context()->find()` both answer null for a value written at worker start. So a
+  value written into the root context is read by worker-level coroutines and by nothing
+  that serves a request, and `new Scope()` is what a test uses to stand in for a request.
+  `AsyncApplication::tryResolveScoped()` guards against writing to the root for the
+  opposite reason — an inherited scope does reach it — and both statements are true of
+  their own case.
 - **A test that binds a stock `Illuminate\Config\Repository` cannot see a mode bug.**
   `WorkerBootstrap` recognises the adapters by `instanceof`, so a stock repository skips
   `bootCompleted()` and writes to the shared array whatever the order of start-up. That is

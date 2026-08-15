@@ -25,9 +25,10 @@ final class WorkerBootstrap
     /**
      * Take a booted application to the state a request handler expects.
      *
-     * Called once per worker thread, before the first request and after every provider
-     * has booted. Calling it twice configures the second time through switched
-     * adapters, which drops the configuration.
+     * Called once after every provider has booted: by each server before its first
+     * request, and by `async:audit`, which drives requests through a worker of its own.
+     * Calling it twice configures the second time through switched adapters, which
+     * drops the configuration.
      */
     public static function run(Application $app): void
     {
