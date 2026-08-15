@@ -52,6 +52,22 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
   `class.notFound` for `FrankenPHP\*`, 4 `classConstant.notFound` for `PDO::ATTR_POOL_*`,
   and one Telescope `staticMethod.notFound`. They predate this work; CI does not run
   PHPStan. Neither custom rule reports anything on `src`.
+- **Which coroutine reads the root context, measured.** `Async\spawn()` and
+  `Scope::inherit()` taken from the root both reach it; a coroutine of a `new Scope()`
+  does not. A request under `TrueAsyncServer` does not either — probed against a live
+  one-worker server, where the handler's `request_context()->find()` and
+  `current_context()->find()` both answer null for a value written at worker start. So a
+  value written into the root context is read by worker-level coroutines and by nothing
+  that serves a request, and `new Scope()` is what a test uses to stand in for a request.
+  `AsyncApplication::tryResolveScoped()` guards against writing to the root for the
+  opposite reason — an inherited scope does reach it — and both statements are true of
+  their own case.
+- **A test that binds a stock `Illuminate\Config\Repository` cannot see a mode bug.**
+  `WorkerBootstrap` recognises the adapters by `instanceof`, so a stock repository skips
+  `bootCompleted()` and writes to the shared array whatever the order of start-up. That is
+  how #45 passed its own test for two releases. The same goes for reading back: a value
+  written in async mode is visible to the coroutine that wrote it, and a test that asserts
+  from there asserts nothing — read from a coroutine in a scope of its own.
 - `Async\request_context()` is always `null` under PHPUnit — the server extension sets it.
   Anything that depends on it can only be checked end to end.
 - A proxy must never be returned from `offsetGet()`: `RoutingServiceProvider` passes
@@ -86,6 +102,7 @@ What #29 fixes is in `CHANGELOG.md`. What it does not fix is below.
 | [#33](https://github.com/YanGusik/laravel-spawn/issues/33) | Laravel's own `scoped()` singletons were never flushed | Container half in #29; a seeder now carries boot-time log context into each request | `RequestLifecycleIsolationTest` |
 | [#34](https://github.com/YanGusik/laravel-spawn/issues/34) | Terminating callbacks accumulate and re-run | The list belongs to the request, in its context; the container keeps only what bootstrap registered | `RequestLifecycleIsolationTest` |
 | [#35](https://github.com/YanGusik/laravel-spawn/issues/35) | `Vite` holds CSP nonce and preloaded assets on a shared singleton | Per-request clone of the boot-time object, render state emptied | `RequestLifecycleIsolationTest` |
+| [#45](https://github.com/YanGusik/laravel-spawn/issues/45) | The PDO pool is never enabled: worker start-up wrote the pool options through an already switched `AsyncConfig`, so requests read the base configuration and shared one connection | Start-up has two phases — configure, then switch — and the pool options are written in the first; the purge covers every connection bootstrap opened, not the default alone | `DatabasePoolOptionsTest`, `WorkerBootstrapOrderTest` |
 
 ### The one pattern behind half of them
 
@@ -164,6 +181,15 @@ visibly; where none is named, nothing will notice the change but a reader.
    only thing that turns async mode on, and `artisan test` does not. Not pinned by a
    test — Mockery is not installed here, and pulling it in for this alone is not worth a
    dependency.
+11. **A connection the pool cannot take throws on its first query, and that is the
+   intended outcome.** `PDO::ATTR_POOL_ENABLED` is refused for `PDO::ATTR_PERSISTENT`
+   (`ext/pdo/pdo_dbh.c`), for a driver that does not implement pooling — `odbc`, `dblib`
+   and `firebird` do not, which covers `sqlsrv` on most builds — and for a private
+   in-memory SQLite database. Start-up puts the options on every configured connection
+   without asking, so such a connection reports the refusal instead of quietly serving
+   one shared handle to every coroutine. Persistent connections are not supported under
+   async serving in the first place: one connection shared across coroutines is the
+   defect the pool exists to prevent.
 
 ---
 

@@ -4,11 +4,24 @@ namespace Spawn\Laravel\Tests;
 
 use Async\Scope;
 use PHPUnit\Framework\TestCase;
+use Spawn\Laravel\Config\AsyncConfig;
 use Spawn\Laravel\Foundation\AsyncApplication;
 use Spawn\Laravel\Foundation\FacadeCache;
 
 abstract class AsyncTestCase extends TestCase
 {
+    /**
+     * The root context outlives the test that wrote into it, and every AsyncConfig in
+     * the process reads the overlay from the same key. Left behind, one test's write
+     * answers for the base configuration in whatever test runs next.
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        \Async\root_context()->set(AsyncConfig::CTX_KEY, [], replace: true);
+    }
+
     /**
      * Facade caching is process state, and enableAsyncMode() switches it off for good.
      * That is right for a worker, which never leaves async mode, and wrong for a test
@@ -21,6 +34,36 @@ abstract class AsyncTestCase extends TestCase
         FacadeCache::resumeCaching();
 
         parent::tearDown();
+    }
+
+    /**
+     * Run a closure the way a server runs a request handler — in a scope of its own,
+     * which reaches neither the root context nor another request's — and return what it
+     * returned.
+     */
+    protected function inRequest(callable $fn): mixed
+    {
+        [$result] = $this->runParallel([$fn]);
+
+        return $result;
+    }
+
+    /**
+     * An application whose config is the real AsyncConfig, which start-up switches.
+     *
+     * A stock Repository writes to the shared array whatever the order of start-up, so
+     * a test bound to one cannot tell a working start-up from a broken one — see the
+     * note in ASYNC_KNOWN_ISSUES.md.
+     *
+     * @param  array<string, mixed>  $items
+     */
+    protected function appWithConfig(array $items): AsyncApplication
+    {
+        $app = new AsyncApplication(sys_get_temp_dir());
+
+        $app->instance('config', new AsyncConfig($items));
+
+        return $app;
     }
 
     protected function createApp(): AsyncApplication

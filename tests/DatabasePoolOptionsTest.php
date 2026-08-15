@@ -2,7 +2,6 @@
 
 namespace Spawn\Laravel\Tests;
 
-use Illuminate\Config\Repository;
 use PDO;
 use Spawn\Laravel\Foundation\AsyncApplication;
 use Spawn\Laravel\Foundation\WorkerBootstrap;
@@ -14,14 +13,17 @@ use Spawn\Laravel\Foundation\WorkerBootstrap;
  */
 class DatabasePoolOptionsTest extends AsyncTestCase
 {
-    private function configure(array $poolConfig): array
+    private function app(array $poolConfig): AsyncApplication
     {
-        $app = new AsyncApplication(sys_get_temp_dir());
-
-        $app->instance('config', new Repository([
+        return $this->appWithConfig([
             'async' => ['db_pool' => $poolConfig],
             'database' => ['connections' => ['mysql' => ['driver' => 'mysql']]],
-        ]));
+        ]);
+    }
+
+    private function configure(array $poolConfig): array
+    {
+        $app = $this->app($poolConfig);
 
         WorkerBootstrap::run($app);
 
@@ -57,5 +59,31 @@ class DatabasePoolOptionsTest extends AsyncTestCase
         $options = $this->configure(['enabled' => true, 'healthcheck_interval' => 0.5]);
 
         $this->assertSame(500, $options[PDO::ATTR_POOL_HEALTHCHECK_INTERVAL]);
+    }
+
+    public function test_a_disabled_pool_leaves_the_connection_alone(): void
+    {
+        $this->assertSame([], $this->configure(['enabled' => false]));
+    }
+
+    /**
+     * The reader of these options is a request coroutine, and it inherits nothing from
+     * the coroutine that started the worker.
+     *
+     * Written after the config adapter is switched, they are kept in the writing
+     * coroutine's overlay: the connection factory then reads the base configuration,
+     * finds no pool, and every coroutine in the worker shares one PDO handle.
+     */
+    public function test_the_options_reach_a_request_coroutine(): void
+    {
+        $app = $this->app(['enabled' => true]);
+
+        WorkerBootstrap::run($app);
+
+        $options = $this->inRequest(fn () => $app->make('config')->get('database.connections.mysql.options'));
+
+        $this->assertIsArray($options, 'the pool options did not reach the request');
+        $this->assertArrayHasKey(PDO::ATTR_POOL_ENABLED, $options);
+        $this->assertTrue($options[PDO::ATTR_POOL_ENABLED]);
     }
 }

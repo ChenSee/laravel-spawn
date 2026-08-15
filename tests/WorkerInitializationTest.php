@@ -2,7 +2,6 @@
 
 namespace Spawn\Laravel\Tests;
 
-use Illuminate\Config\Repository;
 use Illuminate\Support\Facades\Facade;
 use PDO;
 use Spawn\Laravel\Server\TrueAsyncServer;
@@ -17,12 +16,10 @@ class WorkerInitializationTest extends AsyncTestCase
 
     private function appWithDatabase(): \Spawn\Laravel\Foundation\AsyncApplication
     {
-        $app = new \Spawn\Laravel\Foundation\AsyncApplication(sys_get_temp_dir());
-
-        $app->instance('config', new Repository([
+        $app = $this->appWithConfig([
             'async' => ['db_pool' => ['enabled' => true, 'min' => 3, 'max' => 7, 'healthcheck_interval' => 15]],
             'database' => ['connections' => ['mysql' => ['driver' => 'mysql'], 'pgsql' => ['driver' => 'pgsql']]],
-        ]));
+        ]);
 
         /* Adapters the initialization pokes at; plain objects are simply skipped. */
         foreach (['view', 'translator', 'events', 'router'] as $service) {
@@ -30,6 +27,18 @@ class WorkerInitializationTest extends AsyncTestCase
         }
 
         return $app;
+    }
+
+    /**
+     * The options as a request coroutine sees them, which is the only reader that
+     * matters: it inherits nothing from the coroutine that started the worker, so a
+     * write kept in that coroutine's own overlay reads back as null here.
+     *
+     * @return array<int, mixed>|null
+     */
+    private function poolOptions(\Spawn\Laravel\Foundation\AsyncApplication $app, string $name): ?array
+    {
+        return $this->inRequest(fn () => $app->make('config')->get("database.connections.{$name}.options"));
     }
 
     public function test_initialization_enables_async_mode(): void
@@ -49,7 +58,7 @@ class WorkerInitializationTest extends AsyncTestCase
         TrueAsyncServer::initializeApp($app);
 
         foreach (['mysql', 'pgsql'] as $name) {
-            $options = $app->make('config')->get("database.connections.{$name}.options");
+            $options = $this->poolOptions($app, $name);
 
             $this->assertTrue($options[PDO::ATTR_POOL_ENABLED], "{$name} must be pooled");
             $this->assertSame(3, $options[PDO::ATTR_POOL_MIN]);
@@ -66,7 +75,7 @@ class WorkerInitializationTest extends AsyncTestCase
 
         TrueAsyncServer::initializeApp($app);
 
-        $options = $app->make('config')->get('database.connections.mysql.options');
+        $options = $this->poolOptions($app, 'mysql');
 
         $this->assertSame(2, $options[PDO::ATTR_POOL_MIN]);
         $this->assertSame(10, $options[PDO::ATTR_POOL_MAX]);
@@ -81,6 +90,6 @@ class WorkerInitializationTest extends AsyncTestCase
         TrueAsyncServer::initializeApp($app);
 
         $this->assertTrue($app->isAsyncModeEnabled(), 'Async mode must not depend on the DB pool');
-        $this->assertNull($app->make('config')->get('database.connections.mysql.options'));
+        $this->assertNull($this->poolOptions($app, 'mysql'));
     }
 }
