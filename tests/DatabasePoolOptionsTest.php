@@ -87,11 +87,10 @@ class DatabasePoolOptionsTest extends AsyncTestCase
 
         WorkerBootstrap::run($app);
 
-        [$options] = $this->runParallel([
-            fn () => $app->make('config')->get('database.connections.mysql.options'),
-        ]);
+        $options = $this->inRequest(fn () => $app->make('config')->get('database.connections.mysql.options'));
 
         $this->assertIsArray($options, 'the pool options did not reach the request');
+        $this->assertArrayHasKey(PDO::ATTR_POOL_ENABLED, $options);
         $this->assertTrue($options[PDO::ATTR_POOL_ENABLED]);
     }
 }

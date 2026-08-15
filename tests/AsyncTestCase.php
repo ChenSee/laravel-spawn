@@ -4,6 +4,7 @@ namespace Spawn\Laravel\Tests;
 
 use Async\Scope;
 use PHPUnit\Framework\TestCase;
+use Spawn\Laravel\Config\AsyncConfig;
 use Spawn\Laravel\Foundation\AsyncApplication;
 use Spawn\Laravel\Foundation\FacadeCache;
 
@@ -16,11 +17,35 @@ abstract class AsyncTestCase extends TestCase
      * would resolve facades through the container and pass or fail on the order the
      * suite happened to run in.
      */
+    /**
+     * The root context outlives the test that wrote into it, and every AsyncConfig in
+     * the process reads the overlay from the same key. Left behind, one test's write
+     * answers for the base configuration in whatever test runs next.
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        \Async\root_context()->set(AsyncConfig::CTX_KEY, [], replace: true);
+    }
+
     protected function tearDown(): void
     {
         FacadeCache::resumeCaching();
 
         parent::tearDown();
+    }
+
+    /**
+     * Run a closure the way a server runs a request handler — in a scope of its own,
+     * which reaches neither the root context nor another request's — and return what it
+     * returned.
+     */
+    protected function inRequest(callable $fn): mixed
+    {
+        [$result] = $this->runParallel([$fn]);
+
+        return $result;
     }
 
     protected function createApp(): AsyncApplication

@@ -18,25 +18,8 @@ use Spawn\Laravel\Foundation\WorkerBootstrap;
  */
 class WorkerBootstrapOrderTest extends AsyncTestCase
 {
-    /**
-     * The prefix of every key these tests write.
-     *
-     * A write in async mode is kept in the root context, which outlives the test and is
-     * reachable from every later coroutine that inherits it; under a real config key it
-     * would answer for the base configuration in whatever test runs next.
-     */
+    /** The prefix of every key these tests write, so that none of them names real configuration. */
     private const PROBE = 'worker_bootstrap_probe';
-
-    /**
-     * Run a closure the way a server runs a request handler, and return what it
-     * returned.
-     */
-    private function inRequest(callable $fn): mixed
-    {
-        [$result] = $this->runParallel([$fn]);
-
-        return $result;
-    }
 
     /**
      * @return array<string, mixed> the configuration a worker starts with
@@ -61,15 +44,16 @@ class WorkerBootstrapOrderTest extends AsyncTestCase
     }
 
     /**
-     * The invariant a new start-up step has to keep: nothing configures anything after
-     * the first switch.
+     * The invariant a new start-up step has to keep: nothing writes configuration once
+     * the config adapter is switched.
      *
      * The pool options are the only configuration start-up writes today, so the test
      * that follows their delivery covers exactly them. This one covers the step nobody
      * has written yet — put it in the wrong phase and its value goes, with no error, to
-     * an overlay no request reads.
+     * an overlay no request reads. It watches the config adapter alone, so a step that
+     * loses its state through one of the other six switched adapters passes it.
      */
-    public function test_start_up_writes_no_configuration_after_the_first_switch(): void
+    public function test_start_up_writes_no_configuration_after_the_config_adapter_switches(): void
     {
         $app = new AsyncApplication(sys_get_temp_dir());
         $config = new RecordingConfig($this->configItems());

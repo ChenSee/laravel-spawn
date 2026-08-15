@@ -19,7 +19,13 @@ use function Async\root_context;
  */
 class AsyncConfig extends Repository
 {
-    private const CTX_KEY = 'config.overlay';
+    /**
+     * The context entry every instance keeps its overlay under.
+     *
+     * One key for the whole class, so an overlay left in a long-lived context answers
+     * for every AsyncConfig that reads it afterwards.
+     */
+    public const CTX_KEY = 'config.overlay';
 
     private bool $async = false;
 
@@ -46,6 +52,9 @@ class AsyncConfig extends Repository
 
         $keys = is_array($key) ? $key : [$key => $value];
 
+        // The root context only. A write from any other scope without a request is lost
+        // the same way, but under DevServer and artisan every write comes from such a
+        // scope, and the wider test would report the ordinary case as a defect.
         if ($this->diagnostics && $ctx === root_context()) {
             $this->reportRootContextWrite(array_keys($keys));
         }
@@ -129,8 +138,6 @@ class AsyncConfig extends Repository
      */
     private function reportRootContextWrite(array $keys): void
     {
-        // The only readers of such a write are worker-level coroutines that share the
-        // root context.
         error_log(
             "[async] config write from the root context: '" . implode("', '", $keys)
             ."'; requests run in their own scope and read the base configuration instead"

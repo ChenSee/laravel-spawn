@@ -46,11 +46,7 @@ class WorkerInitializationTest extends AsyncTestCase
      */
     private function poolOptions(\Spawn\Laravel\Foundation\AsyncApplication $app, string $name): ?array
     {
-        [$options] = $this->runParallel([
-            fn () => $app->make('config')->get("database.connections.{$name}.options"),
-        ]);
-
-        return $options;
+        return $this->inRequest(fn () => $app->make('config')->get("database.connections.{$name}.options"));
     }
 
     public function test_initialization_enables_async_mode(): void

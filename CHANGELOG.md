@@ -21,7 +21,7 @@
 - `perRequestKey()` stops re-reading `config('async.scoped_services')` once async mode is on. With the shipped default of an empty list the read fired on every resolve that was not per-request
 
 ### Added
-- Under `async.diagnostics`, a config write from the root context is reported: the value stays in the root context's own overlay, the base configuration is unchanged, and every request reads that. A write from a coroutine in a scope of its own is equally lost and is not reported: start-up code writes from the root context
+- Under `async.diagnostics`, a config write from the root context is reported: the value stays in the root context's own overlay, the base configuration is unchanged, and every request reads the base configuration. A write from a coroutine in a scope of its own is equally lost and is not reported: start-up code writes from the root context
 - `run_render_load.php` (`RenderLoadE2ETest`) — sixty concurrent requests against a real `TrueAsyncServer`, each carrying its own token through the sections, `@push`, `@once`, a component slot, the cookie jar, the URL generator and a terminating callback, with the render suspending inside an `@include`. Make the render state shared again and every page comes back holding four other requests' tokens
 - `bench_render.php` — what the per-request render state costs a page, priced against the stock factory and against a process-wide state
 - `PerRequestCaptureAudit` — walks the resolved singletons and reports any holding an object that belongs to one request, the shape behind `StartSession` and `Redirector`. Runs at worker start under `async.diagnostics`; `AsyncApplication::perRequestCaptures()` returns the same findings to a caller
