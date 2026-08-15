@@ -10,25 +10,17 @@ use Illuminate\Contracts\Foundation\Application;
  * The three servers each need exactly this, which is why it is here rather than in one
  * of them: they differ in how they accept a connection and in nothing else about start-up.
  *
- * The work has two phases, and the split is what holds the order. configure() runs
- * while every adapter still writes to state the whole worker shares. switchToAsync()
- * is a series of one-way switches: past the first of them, a write through a switched
- * object is kept in the current request's context, and worker bootstrap has no request,
- * so the value sits in an overlay no request reads. Start-up work that configures
- * anything belongs in configure().
- *
- * Warming a pool is not here: it runs inside a server, before the accept loop, and only
- * DevServer has that place — see {@see \Spawn\Laravel\Server\Concerns\ManagesDatabasePool}.
+ * The order is the point. The pools are configured first, the adapters are told that
+ * boot is over next, and async mode is switched on last — because switching one on is
+ * what makes a write per-request, and bootstrap has no request. Anything configured
+ * after the first switch is configured where nobody reads it.
  */
 final class WorkerBootstrap
 {
     /**
-     * Take a booted application to the state a request handler expects.
+     * Take a booted application to the state a request handler expects, once per worker.
      *
-     * Called once after every provider has booted: by each server before its first
-     * request, and by `async:audit`, which drives requests through a worker of its own.
-     * Calling it twice configures the second time through switched adapters, which
-     * drops the configuration.
+     * A second call configures through switched adapters and loses what it configures.
      */
     public static function run(Application $app): void
     {
@@ -38,9 +30,6 @@ final class WorkerBootstrap
         self::switchToAsync($app);
     }
 
-    /**
-     * Every write that has to reach the whole worker.
-     */
     private static function configure(Application $app): void
     {
         self::configureDatabasePool($app);
@@ -50,16 +39,10 @@ final class WorkerBootstrap
         \Spawn\Laravel\Redis\RedisPool::configure($app);
     }
 
-    /**
-     * Hand the adapters and then the container over to per-request mode.
-     *
-     * The adapters go first because one of them registers a per-request service of its
-     * own — AsyncRouter::bootCompleted() registers Route — and enableAsyncMode() walks
-     * the per-request aliases once, to capture their boot-time prototypes and install
-     * their facade proxies. Whatever an adapter registers after that walk is outside it.
-     */
     private static function switchToAsync(Application $app): void
     {
+        // Adapters first: AsyncRouter registers Route as per-request here, and
+        // enableAsyncMode() walks the per-request aliases only once.
         self::completeBoot($app);
 
         if ($app instanceof AsyncApplication) {
@@ -155,8 +138,7 @@ final class WorkerBootstrap
         if ($app->bound('db')) {
             $db = $app->make('db');
 
-            // By name, because purge() without one reaches the default connection alone
-            // and a second connection a provider touched would keep its unpooled PDO.
+            // By name: purge() without one reaches the default connection alone.
             foreach (array_keys($db->getConnections()) as $name) {
                 $db->purge($name);
             }

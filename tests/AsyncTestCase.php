@@ -11,15 +11,14 @@ use Spawn\Laravel\Foundation\FacadeCache;
 abstract class AsyncTestCase extends TestCase
 {
     /**
-     * The root context outlives the test that wrote into it, and every AsyncConfig in
-     * the process reads the overlay from the same key. Left behind, one test's write
+     * The root context outlives the test that wrote into it, so a write left there
      * answers for the base configuration in whatever test runs next.
      */
     protected function setUp(): void
     {
         parent::setUp();
 
-        \Async\root_context()->set(AsyncConfig::CTX_KEY, [], replace: true);
+        AsyncConfig::forgetOverlay(\Async\root_context());
     }
 
     /**
@@ -37,9 +36,8 @@ abstract class AsyncTestCase extends TestCase
     }
 
     /**
-     * Run a closure the way a server runs a request handler — in a scope of its own,
-     * which reaches neither the root context nor another request's — and return what it
-     * returned.
+     * Run a closure in a scope of its own, the way a server runs a request handler:
+     * reaching neither the root context nor another request's.
      */
     protected function inRequest(callable $fn): mixed
     {
@@ -49,11 +47,8 @@ abstract class AsyncTestCase extends TestCase
     }
 
     /**
-     * An application whose config is the real AsyncConfig, which start-up switches.
-     *
-     * A stock Repository writes to the shared array whatever the order of start-up, so
-     * a test bound to one cannot tell a working start-up from a broken one — see the
-     * note in ASYNC_KNOWN_ISSUES.md.
+     * An application whose config is the real AsyncConfig, which start-up switches and a
+     * stock Repository does not — see the note in ASYNC_KNOWN_ISSUES.md.
      *
      * @param  array<string, mixed>  $items
      */

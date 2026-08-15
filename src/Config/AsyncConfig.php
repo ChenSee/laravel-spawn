@@ -2,6 +2,7 @@
 
 namespace Spawn\Laravel\Config;
 
+use Async\Context;
 use Illuminate\Config\Repository;
 use Illuminate\Support\Arr;
 use Spawn\Laravel\Foundation\RequestContext;
@@ -19,13 +20,8 @@ use function Async\root_context;
  */
 class AsyncConfig extends Repository
 {
-    /**
-     * The context entry every instance keeps its overlay under.
-     *
-     * One key for the whole class, so an overlay left in a long-lived context answers
-     * for every AsyncConfig that reads it afterwards.
-     */
-    public const CTX_KEY = 'config.overlay';
+    /** One key for the whole class: an overlay left in a long-lived context answers for every instance. */
+    private const CTX_KEY = 'config.overlay';
 
     private bool $async = false;
 
@@ -33,11 +29,18 @@ class AsyncConfig extends Repository
 
     public function bootCompleted(): void
     {
-        // Cached here rather than read inside set(): a coroutine that writes this very
-        // key would otherwise turn the report off for its own writes, and the lookup
-        // would repeat on every write for a setting that cannot change after boot.
+        // Read now: a coroutine writing this key would turn the report off for itself.
         $this->diagnostics = (bool) $this->get('async.diagnostics', false);
         $this->async       = true;
+    }
+
+    /**
+     * Drop the overlay a context holds, so its next read falls through to the base
+     * configuration.
+     */
+    public static function forgetOverlay(Context $ctx): void
+    {
+        $ctx->set(self::CTX_KEY, [], replace: true);
     }
 
     public function set($key, $value = null)
@@ -52,9 +55,7 @@ class AsyncConfig extends Repository
 
         $keys = is_array($key) ? $key : [$key => $value];
 
-        // The root context only. A write from any other scope without a request is lost
-        // the same way, but under DevServer and artisan every write comes from such a
-        // scope, and the wider test would report the ordinary case as a defect.
+        // Root only: elsewhere a write without a request is the ordinary case.
         if ($this->diagnostics && $ctx === root_context()) {
             $this->reportRootContextWrite(array_keys($keys));
         }
