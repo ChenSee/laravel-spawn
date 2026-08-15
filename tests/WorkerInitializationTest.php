@@ -4,14 +4,8 @@ namespace Spawn\Laravel\Tests;
 
 use Illuminate\Support\Facades\Facade;
 use PDO;
-use Spawn\Laravel\Config\AsyncConfig;
 use Spawn\Laravel\Server\TrueAsyncServer;
 
-/**
- * The config is the real AsyncConfig, because start-up switches it and a stock
- * Repository does not switch: it writes to the shared array whatever the order of
- * start-up, and a test bound to one cannot tell a working start-up from a broken one.
- */
 class WorkerInitializationTest extends AsyncTestCase
 {
     protected function tearDown(): void
@@ -22,12 +16,10 @@ class WorkerInitializationTest extends AsyncTestCase
 
     private function appWithDatabase(): \Spawn\Laravel\Foundation\AsyncApplication
     {
-        $app = new \Spawn\Laravel\Foundation\AsyncApplication(sys_get_temp_dir());
-
-        $app->instance('config', new AsyncConfig([
+        $app = $this->appWithConfig([
             'async' => ['db_pool' => ['enabled' => true, 'min' => 3, 'max' => 7, 'healthcheck_interval' => 15]],
             'database' => ['connections' => ['mysql' => ['driver' => 'mysql'], 'pgsql' => ['driver' => 'pgsql']]],
-        ]));
+        ]);
 
         /* Adapters the initialization pokes at; plain objects are simply skipped. */
         foreach (['view', 'translator', 'events', 'router'] as $service) {

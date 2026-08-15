@@ -36,11 +36,7 @@ class WorkerBootstrapOrderTest extends AsyncTestCase
 
     private function app(array $async = [], ?array $connections = null): AsyncApplication
     {
-        $app = new AsyncApplication(sys_get_temp_dir());
-
-        $app->instance('config', new AsyncConfig($this->configItems($async, $connections)));
-
-        return $app;
+        return $this->appWithConfig($this->configItems($async, $connections));
     }
 
     /**
@@ -137,12 +133,12 @@ class WorkerBootstrapOrderTest extends AsyncTestCase
         try {
             $app->make('config')->set(self::PROBE . '.from_root', 'UTC');
             $this->inRequest(fn () => $app->make('config')->set(self::PROBE . '.from_request', 'en'));
+
+            $reported = file_get_contents($log);
         } finally {
             ini_set('error_log', $previous);
+            unlink($log);
         }
-
-        $reported = file_get_contents($log);
-        unlink($log);
 
         $this->assertStringContainsString(self::PROBE . '.from_root', $reported);
         $this->assertStringNotContainsString(

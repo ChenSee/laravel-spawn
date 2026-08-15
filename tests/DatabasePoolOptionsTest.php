@@ -3,7 +3,6 @@
 namespace Spawn\Laravel\Tests;
 
 use PDO;
-use Spawn\Laravel\Config\AsyncConfig;
 use Spawn\Laravel\Foundation\AsyncApplication;
 use Spawn\Laravel\Foundation\WorkerBootstrap;
 
@@ -11,21 +10,15 @@ use Spawn\Laravel\Foundation\WorkerBootstrap;
  * The pool options every worker injects on its way to its first request.
  *
  * One place injects them for all three servers, so the conversion is checked once.
- * The config is the real AsyncConfig: a stock Repository writes to the shared array
- * whatever the order of start-up, which is exactly the difference under test.
  */
 class DatabasePoolOptionsTest extends AsyncTestCase
 {
     private function app(array $poolConfig): AsyncApplication
     {
-        $app = new AsyncApplication(sys_get_temp_dir());
-
-        $app->instance('config', new AsyncConfig([
+        return $this->appWithConfig([
             'async' => ['db_pool' => $poolConfig],
             'database' => ['connections' => ['mysql' => ['driver' => 'mysql']]],
-        ]));
-
-        return $app;
+        ]);
     }
 
     private function configure(array $poolConfig): array

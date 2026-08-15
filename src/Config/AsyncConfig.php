@@ -139,7 +139,7 @@ class AsyncConfig extends Repository
     private function reportRootContextWrite(array $keys): void
     {
         error_log(
-            "[async] config write from the root context: '" . implode("', '", $keys)
+            "[async] config write from the root context: '".implode("', '", $keys)
             ."'; requests run in their own scope and read the base configuration instead"
         );
     }

@@ -11,13 +11,6 @@ use Spawn\Laravel\Foundation\FacadeCache;
 abstract class AsyncTestCase extends TestCase
 {
     /**
-     * Facade caching is process state, and enableAsyncMode() switches it off for good.
-     * That is right for a worker, which never leaves async mode, and wrong for a test
-     * process, which runs one application after another: left off, every later test
-     * would resolve facades through the container and pass or fail on the order the
-     * suite happened to run in.
-     */
-    /**
      * The root context outlives the test that wrote into it, and every AsyncConfig in
      * the process reads the overlay from the same key. Left behind, one test's write
      * answers for the base configuration in whatever test runs next.
@@ -29,6 +22,13 @@ abstract class AsyncTestCase extends TestCase
         \Async\root_context()->set(AsyncConfig::CTX_KEY, [], replace: true);
     }
 
+    /**
+     * Facade caching is process state, and enableAsyncMode() switches it off for good.
+     * That is right for a worker, which never leaves async mode, and wrong for a test
+     * process, which runs one application after another: left off, every later test
+     * would resolve facades through the container and pass or fail on the order the
+     * suite happened to run in.
+     */
     protected function tearDown(): void
     {
         FacadeCache::resumeCaching();
@@ -46,6 +46,24 @@ abstract class AsyncTestCase extends TestCase
         [$result] = $this->runParallel([$fn]);
 
         return $result;
+    }
+
+    /**
+     * An application whose config is the real AsyncConfig, which start-up switches.
+     *
+     * A stock Repository writes to the shared array whatever the order of start-up, so
+     * a test bound to one cannot tell a working start-up from a broken one — see the
+     * note in ASYNC_KNOWN_ISSUES.md.
+     *
+     * @param  array<string, mixed>  $items
+     */
+    protected function appWithConfig(array $items): AsyncApplication
+    {
+        $app = new AsyncApplication(sys_get_temp_dir());
+
+        $app->instance('config', new AsyncConfig($items));
+
+        return $app;
     }
 
     protected function createApp(): AsyncApplication
