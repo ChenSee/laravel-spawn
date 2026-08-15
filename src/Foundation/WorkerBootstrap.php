@@ -17,8 +17,8 @@ use Illuminate\Contracts\Foundation\Application;
  * so the value sits in an overlay no request reads. Start-up work that configures
  * anything belongs in configure().
  *
- * Warming a pool is not here: it needs a coroutine that outlives a request, and only a
- * server has one — see {@see \Spawn\Laravel\Server\Concerns\ManagesDatabasePool}.
+ * Warming a pool is not here: it runs inside a server, before the accept loop, and only
+ * DevServer has that place — see {@see \Spawn\Laravel\Server\Concerns\ManagesDatabasePool}.
  */
 final class WorkerBootstrap
 {
