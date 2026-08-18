@@ -71,7 +71,7 @@ class TrueAsyncServer implements ServerInterface
                 $kernel = $app->make(Kernel::class);
                 try {
                     $laravelResponse = $kernel->handle($request);
-                    $this->sendResponse($taResponse, $laravelResponse);
+                    $this->sendResponse($taResponse, $laravelResponse, $taRequest->getMethod() === 'HEAD');
 
                     $kernel->terminate($request, $laravelResponse);
                 } catch (\Throwable $e) {
@@ -372,7 +372,13 @@ class TrueAsyncServer implements ServerInterface
         });
     }
 
-    private function sendResponse(HttpResponse $taResponse, SymfonyResponse $response): void
+    /**
+     * Hand the finished Laravel response to the server.
+     *
+     * @param bool $isHead the wire method was HEAD, so the body is dropped and Laravel's own
+     *                     Content-Length is the only description of the would-be body
+     */
+    private function sendResponse(HttpResponse $taResponse, SymfonyResponse $response, bool $isHead): void
     {
         // Already streamed and closed directly (Sse::end(), or any other code
         // that wrote to trueasync_response() itself) — nothing left to send.
@@ -383,6 +389,13 @@ class TrueAsyncServer implements ServerInterface
         $taResponse->setStatusCode($response->getStatusCode());
 
         foreach ($response->headers->allPreserveCaseWithoutCookies() as $name => $values) {
+            /* Only the server knows how many bytes it writes: compression re-encodes the
+             * body, and a Laravel value outlives every later change to the content. HEAD is
+             * the exception, its body is dropped on purpose (RFC 9110 §9.3.2). */
+            if (!$isHead && strcasecmp($name, 'Content-Length') === 0) {
+                continue;
+            }
+
             $first = true;
             foreach ($values as $value) {
                 if ($first) {
