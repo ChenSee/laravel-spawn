@@ -191,7 +191,22 @@ visibly; where none is named, nothing will notice the change but a reader.
    one shared handle to every coroutine. Persistent connections are not supported under
    async serving in the first place: one connection shared across coroutines is the
    defect the pool exists to prevent.
-
+12. **Eloquent's relation-constraints flag is rewritten, not configured.** `RelationConstraints`
+   redirects Composer's class map to rewritten copies of `Relation` and the five classes whose
+   `addConstraints()` reads the flag, generated at autoload time from whatever source is
+   installed. Both call sites of `addConstraints()` are therefore covered, the constructor and
+   `Concerns\CanBeOneOfMany::ofMany()`. Four conditions leave the application on Laravel's own
+   classes: `SPAWN_RELATION_PATCH=0`; a build whose `opcache.preload` declared any of the six
+   before Composer includes `src/bootstrap.php`; a temporary directory that cannot be written;
+   and a source whose statements the rewrite no longer recognises. Worker start-up writes the
+   reason to stderr and serves anyway, since the alternative is refusing to serve at all.
+   Two things the patch does not do. A coroutine spawned **inside** a window does not inherit
+   it — the window lives in the opener's own context — so a relation built there is constrained
+   where the opener wanted it bare; that is a different wrong answer from the one upstream
+   gives, not a new class of one. And the rewritten classes are what the process runs while
+   every tool — PHPStan, the debugger, `git diff vendor/` — reads Laravel's originals.
+   `tests/RelationConstraintsTest.php` pins the behaviour, and five of its cases fail with the
+   patch switched off.
 ---
 
 ## 3. Container contract gaps in `tryResolveScoped()`

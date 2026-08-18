@@ -3,6 +3,7 @@
 namespace Spawn\Laravel\Foundation;
 
 use Illuminate\Contracts\Foundation\Application;
+use Spawn\Laravel\Database\Eloquent\RelationConstraints;
 
 /**
  * Everything a worker does between a booted application and its first request.
@@ -45,9 +46,26 @@ final class WorkerBootstrap
         // enableAsyncMode() walks the per-request aliases only once.
         self::completeBoot($app);
 
+        self::startRelationConstraints();
+
         if ($app instanceof AsyncApplication) {
             $app->enableAsyncMode();
         }
+    }
+
+    /**
+     * Hand Eloquent's relation-constraints flag to the coroutines, and say so when it
+     * cannot be handed over: without the patch a worker still serves, and what it serves
+     * is one request's rows to another. That is worth a line on stderr at every start.
+     */
+    private static function startRelationConstraints(): void
+    {
+        if (RelationConstraints::startServing()) {
+            return;
+        }
+
+        fwrite(STDERR, '[async] Eloquent relation constraints are not coroutine-safe in this worker: '
+            .RelationConstraints::status()."\n");
     }
 
     /**
