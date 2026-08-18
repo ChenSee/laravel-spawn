@@ -31,8 +31,7 @@ if (! function_exists('trueasync_response')) {
 
 if (! function_exists('trueasync_metrics')) {
     /**
-     * The running server's counters: request totals, live connections, per-worker
-     * numbers and a Prometheus rendering. Same object as app(ServerMetrics::class).
+     * The running server's counters. Same instance as app(ServerMetrics::class).
      */
     function trueasync_metrics(): ServerMetrics
     {

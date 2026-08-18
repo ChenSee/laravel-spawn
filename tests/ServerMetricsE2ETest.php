@@ -40,6 +40,7 @@ class ServerMetricsE2ETest extends TestCase
         $output = implode("\n", $lines);
 
         $this->assertSame(0, $code, "e2e runner exited non-zero:\n{$output}");
-        $this->assertStringContainsString('0 failed', $output, $output);
+        // Anchored: 'contains 0 failed' also matches a run that reported 10 failures.
+        $this->assertMatchesRegularExpression('/E2E: \d+ passed, 0 failed/', $output, $output);
     }
 }

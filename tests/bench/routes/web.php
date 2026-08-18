@@ -139,8 +139,8 @@ $router->get('/metrics.json', function () {
     ]);
 });
 
-// Same probe for a server started with statistics off: nothing to report, and asking
-// for a number throws rather than answering zero.
+// Same probe for a server started with statistics off: a counter read throws rather than
+// answering zero, while the timings answer, because they do not depend on that setting.
 $router->get('/metrics-availability', function () {
     $metrics = trueasync_metrics();
     $thrown  = null;
@@ -154,5 +154,6 @@ $router->get('/metrics-availability', function () {
     return response()->json([
         'available' => $metrics->isAvailable(),
         'thrown'    => $thrown,
+        'latency'   => $metrics->latency(),
     ]);
 });

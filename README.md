@@ -463,9 +463,9 @@ Route::get('/metrics', fn () => response(
 ```
 
 The package publishes no endpoint of its own, so the URL and who may read it stay yours.
-`totals()`, `workers()` and `latency()` return the same numbers as arrays. Counters are
-collected while `async.server.stats` is on, which it is by default. See
-[docs/METRICS.md](docs/METRICS.md).
+`totals()`, `workers()` and `latency()` return the same numbers as arrays. The counters are
+always incremented; `async.server.stats` decides whether the aggregate can be read, and it
+is on by default. See [docs/METRICS.md](docs/METRICS.md).
 
 ---
 

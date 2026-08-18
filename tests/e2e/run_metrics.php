@@ -11,8 +11,8 @@
  *
  * `php run_metrics.php off` starts the same server with `stats` off, where the counters
  * are unavailable and asking for one throws instead of answering zero. `timing` starts it
- * with `telemetry` on, the only mode in which the latency numbers are anything but zero, and
- * `pool` starts two workers, where the counters of both have to reach one scrape.
+ * with `telemetry` on, which is what makes the latency numbers move, and `pool` starts two
+ * workers, where the counters of both have to add up to the totals of one scrape.
  *
  * Exits 0 if all scenarios pass, 1 otherwise. Run directly, or via ServerMetricsE2ETest.
  */
@@ -31,8 +31,9 @@ $bootstrap = __DIR__ . '/../bench/bootstrap/app.php';
 $host = '127.0.0.1';
 
 /*
- * Three modes, a port each: `on` is the shipped default (counters, no timing stamps),
- * `timing` adds `telemetry`, `off` runs with the counters disabled.
+ * Four modes, a port each: `on` is the shipped default (counters, no timing stamps),
+ * `timing` adds `telemetry`, `pool` runs two workers, `off` runs with the counters
+ * disabled.
  */
 $mode         = $argv[1] ?? 'on';
 $statsEnabled = $mode !== 'off';
@@ -124,6 +125,12 @@ $main = spawn(static function () use (
                 . var_export($report['thrown'] ?? null, true),
             ($report['thrown'] ?? null) === 'RuntimeException',
         );
+        // The timing stamps are gated by `telemetry`, not by `stats`, so these answer.
+        $check(
+            'stats off: the timings answer with zeros rather than throwing — '
+                . json_encode($report['latency'] ?? null),
+            ($report['latency']['sojourn_samples'] ?? null) === 0,
+        );
 
         echo "\nE2E: {$pass} passed, {$fail} failed\n";
         $exitCode = $fail === 0 ? 0 : 1;
@@ -161,26 +168,25 @@ $main = spawn(static function () use (
         count($reported) === $workers,
     );
 
-    // Every worker reports the same counter names as the totals do.
-    $shape = [];
-    foreach ($reported as $id => $counters) {
-        $missing = array_diff_key($totals, $counters);
-        if ($missing !== []) {
-            $shape[$id] = array_keys($missing);
-        }
-    }
+    /* The point of the pool mode: one scrape has to answer for every worker. No reload
+     * happened and an H1 listener is served by workers alone, so the per-worker requests
+     * add up to the totals exactly. */
+    $summed = array_sum(array_column($reported, 'total_requests'));
 
     $check(
-        'json: every worker reports the counters the totals do'
-            . ($shape === [] ? '' : ' — ' . json_encode(array_slice($shape, 0, 2, true))),
-        $shape === [],
+        "json: the workers' own requests add up to the totals ({$summed} of "
+            . ($totals['total_requests'] ?? 'missing') . ')',
+        $summed === ($totals['total_requests'] ?? -1),
     );
 
     $latency = $report['latency'] ?? [];
 
+    $wanted = ['sojourn_samples', 'sojourn_avg_ms', 'sojourn_max_ms', 'service_avg_ms'];
+
+    // A set, not a list: the order comes from the extension's own telemetry array.
     $check(
         'json: latency carries the four timing keys — ' . json_encode($latency),
-        array_keys($latency) === ['sojourn_samples', 'sojourn_avg_ms', 'sojourn_max_ms', 'service_avg_ms'],
+        array_diff($wanted, array_keys($latency)) === [] && count($latency) === count($wanted),
     );
 
     if ($telemetry) {
@@ -213,8 +219,13 @@ $main = spawn(static function () use (
         str_contains($text, "# TYPE spawn_active_requests gauge\n"),
     );
     $check(
-        'prometheus: each counter also appears per worker',
-        (bool) preg_match('/^spawn_requests_total\{worker="\d+"\} \d+$/m', $text),
+        'prometheus: each counter also appears per worker under a name of its own',
+        (bool) preg_match('/^spawn_worker_requests_total\{worker="\d+"\} \d+$/m', $text),
+    );
+    // One name carrying both the sum and the parts would double every sum() over it.
+    $check(
+        'prometheus: the summed reading shares no name with the per-worker series',
+        !preg_match('/^spawn_requests_total\{/m', $text),
     );
     $check(
         'prometheus: the worker count is reported',

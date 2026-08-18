@@ -10,9 +10,9 @@ use Spawn\Laravel\Server\ServerMetrics;
  *
  * What the exposition has to satisfy is decided by Prometheus, not by the server: a
  * `_total` is a counter and everything else a gauge, a name carries its suffix rather
- * than its prefix, and a per-worker series repeats the metric under a label. The e2e
- * test drives the same code against a running server; this one pins the shape, including
- * the cases a live server rarely produces.
+ * than its prefix, and a summed reading never shares a metric name with the per-worker
+ * series it was summed from. The e2e test drives the same code against a running server;
+ * this one pins the shape, including the cases a live server rarely produces.
  */
 class ServerMetricsRenderTest extends TestCase
 {
@@ -41,13 +41,27 @@ class ServerMetricsRenderTest extends TestCase
         $this->assertStringContainsString("\nspawn_active_requests 1\n", $text);
     }
 
-    public function test_every_counter_repeats_per_worker_under_its_own_id(): void
+    public function test_per_worker_readings_carry_a_name_of_their_own(): void
     {
         $text = ServerMetrics::render(self::STATS);
 
-        $this->assertStringContainsString('spawn_requests_total{worker="0"} 7', $text);
-        $this->assertStringContainsString('spawn_requests_total{worker="3"} 5', $text);
-        $this->assertStringContainsString('spawn_active_requests{worker="3"} 0', $text);
+        $this->assertStringContainsString("# TYPE spawn_worker_requests_total counter\n", $text);
+        $this->assertStringContainsString('spawn_worker_requests_total{worker="0"} 7', $text);
+        $this->assertStringContainsString('spawn_worker_requests_total{worker="3"} 5', $text);
+        $this->assertStringContainsString('spawn_worker_active_requests{worker="3"} 0', $text);
+    }
+
+    /**
+     * The summed reading and the per-worker series must not share a metric name: with one
+     * name for both, `sum(spawn_requests_total)` in PromQL counts every request twice.
+     */
+    public function test_a_summed_reading_shares_no_name_with_the_series_it_sums(): void
+    {
+        $text = ServerMetrics::render(self::STATS);
+
+        $labelled = preg_grep('/^spawn_requests_total\{/', explode("\n", $text));
+
+        $this->assertSame([], $labelled);
     }
 
     public function test_the_number_of_workers_is_a_metric_of_its_own(): void
@@ -65,11 +79,18 @@ class ServerMetricsRenderTest extends TestCase
         $this->assertStringNotContainsString('spawn_', $text);
     }
 
+    public function test_a_prefix_that_is_not_a_metric_name_is_refused(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        ServerMetrics::render(self::STATS, 'my metric');
+    }
+
     /**
-     * A counter the totals carry and a worker does not: a worker that retired between
-     * the two reads leaves its counts in the totals alone.
+     * A stats array whose worker slots carry fewer counters than the totals: an older
+     * extension against a newer package, or a fixture built by hand.
      */
-    public function test_a_counter_a_worker_does_not_report_yields_no_series_for_it(): void
+    public function test_a_counter_no_worker_reports_yields_no_series_for_it(): void
     {
         $text = ServerMetrics::render([
             'workers' => [0 => ['total_requests' => 7]],
@@ -77,7 +98,12 @@ class ServerMetricsRenderTest extends TestCase
         ]);
 
         $this->assertStringContainsString("\nspawn_requests_shed_total 4\n", $text);
-        $this->assertStringNotContainsString('spawn_requests_shed_total{', $text);
+        $this->assertStringNotContainsString('spawn_worker_requests_shed_total', $text);
+    }
+
+    public function test_an_empty_stats_array_renders_the_worker_count_alone(): void
+    {
+        $this->assertSame("# TYPE spawn_workers gauge\nspawn_workers 0\n", ServerMetrics::render([]));
     }
 
     public function test_the_body_ends_with_a_newline(): void

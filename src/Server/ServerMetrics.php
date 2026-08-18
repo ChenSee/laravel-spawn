@@ -5,13 +5,12 @@ namespace Spawn\Laravel\Server;
 use TrueAsync\HttpServer;
 
 /**
- * The running server's counters, for application code that has no reference to it.
+ * The running server's counters, for application code that holds no reference to it.
  *
- * The extension keeps per-worker counters and exposes them on the `HttpServer` object;
- * it serves no endpoint and knows no exposition format, by the decision recorded in
- * true-async/server#5. A controller cannot reach that object — `TrueAsyncServer::start()`
- * builds it and never returns — so the server binds it into the worker's container, where
- * this class answers for it:
+ * The extension keeps per-worker counters and exposes them on the `HttpServer` object.
+ * It serves no endpoint and implements no exposition format, and `TrueAsyncServer::start()`
+ * holds the server object for the whole run, so the server binds this class into each
+ * worker's container instead:
  *
  *     Route::get('/metrics', fn () => response(
  *         app(ServerMetrics::class)->toPrometheus(),
@@ -19,23 +18,23 @@ use TrueAsync\HttpServer;
  *         ['Content-Type' => 'text/plain; version=0.0.4'],
  *     ));
  *
- * Which URL the metrics live at, who may read it and what format it speaks stay with
- * the application. Counters are collected only when `async.server.stats` is on.
+ * The application chooses the URL, the access rules and the format. See docs/METRICS.md.
  */
 final class ServerMetrics
 {
     /**
-     * The server this worker serves through, or null where none does.
+     * The HttpServer of this worker; null in a process that serves no requests through
+     * TrueAsyncServer.
      *
-     * The container holds one of these per worker, and a worker serves through one
-     * server for its whole life, so this is set once and read by every request of that
-     * worker. Nothing per-request is kept here.
+     * The container holds one of these per worker and a worker serves through one server
+     * for its whole life. State here is per-worker and lives as long as the worker.
      */
     private ?HttpServer $server = null;
 
     /**
-     * Bind the server whose counters this object reports. Called by the server itself;
-     * an application has no reason to call it.
+     * Bind the server whose counters this object reports.
+     *
+     * @internal Called by TrueAsyncServer when a worker takes its first request.
      */
     public function useServer(HttpServer $server): void
     {
@@ -43,31 +42,23 @@ final class ServerMetrics
     }
 
     /**
-     * Whether counters can be read at all: this process serves requests through the
-     * TrueAsync server and `async.server.stats` was on when it started.
+     * Whether the counters can be read: this process serves through TrueAsyncServer and
+     * `async.server.stats` was on when the server started.
      *
-     * False under `artisan serve`, under DevServer and in tests, where reading throws.
+     * False under `artisan serve`, under DevServer and in tests. `latency()` answers even
+     * when this is false, because timings do not depend on `async.server.stats`.
      */
     public function isAvailable(): bool
     {
-        if ($this->server === null) {
-            return false;
-        }
-
-        try {
-            $this->server->getStats();
-        } catch (\Throwable) {
-            return false;
-        }
-
-        return true;
+        return $this->server !== null && $this->server->getConfig()->isStatsEnabled();
     }
 
     /**
      * Counters summed across every worker, keyed by counter name.
      *
-     * Totals also carry the counts of workers that have already exited, so a hot reload
-     * does not make a counter run backwards.
+     * Monotonic counters also carry the counts of workers that have exited, so a hot
+     * reload does not make one run backwards; gauges belong to live workers only. Requests
+     * a reactor thread serves end to end are in these sums and in no worker's numbers.
      *
      * @return array<string,int>
      */
@@ -89,32 +80,32 @@ final class ServerMetrics
     }
 
     /**
-     * Request timing of the worker that serves this call, in milliseconds.
+     * Request timing of the worker that serves this call, in milliseconds, counted since
+     * that worker started.
      *
      * Scoped to one worker because the extension keeps timings per thread: under a pool
-     * each scrape lands on whichever worker took the request. Keys are `sojourn_samples`,
-     * `sojourn_avg_ms`, `sojourn_max_ms` and `service_avg_ms` — the wait before the
-     * handler ran and the handler's own time. Percentiles are not available.
+     * each scrape lands on whichever worker took the request (true-async/server#169).
+     * `sojourn_*` is the wait before the handler ran, `service_avg_ms` the handler's own
+     * time; both are averages over the worker's whole life, and `sojourn_max_ms` never
+     * falls. Percentiles are not available.
      *
-     * Every value reads zero until `async.server.telemetry` is on: the timing stamps
-     * these numbers come from are collected only when something asks for them.
+     * The four read zero unless the per-request timing stamps are on. `async.server.telemetry`
+     * turns them on; so do a non-zero CoDel target and an access-log sink.
      *
-     * @return array<string,float|int>
+     * @return array{sojourn_samples:int,sojourn_avg_ms:float,sojourn_max_ms:float,service_avg_ms:float}
      */
     public function latency(): array
     {
-        $telemetry = $this->server()->getTelemetry();
+        $keys = ['sojourn_samples' => 0, 'sojourn_avg_ms' => 0.0, 'sojourn_max_ms' => 0.0, 'service_avg_ms' => 0.0];
 
-        return array_intersect_key($telemetry, array_flip([
-            'sojourn_samples',
-            'sojourn_avg_ms',
-            'sojourn_max_ms',
-            'service_avg_ms',
-        ]));
+        return array_intersect_key($this->server()->getTelemetry(), $keys) + $keys;
     }
 
     /**
      * Everything above in one array: `workers`, `totals` and `latency`.
+     *
+     * The two counter readings are taken one after the other, so under traffic the
+     * per-worker numbers and the totals are moments apart.
      *
      * @return array{workers:array<int,array<string,int>>,totals:array<string,int>,latency:array<string,float|int>}
      */
@@ -133,9 +124,8 @@ final class ServerMetrics
      * The counters in the Prometheus text exposition format, ready to be the body of a
      * `text/plain; version=0.0.4` response.
      *
-     * Every counter is emitted twice: once summed, once per worker under a `worker`
-     * label. Timings are left out — they belong to one worker, and a scrape that lands
-     * on a different worker each time would draw a line out of unrelated numbers.
+     * Timings are per worker, and consecutive scrapes read different workers, so a series
+     * built from them measures nothing; they are left out.
      *
      * @param string $prefix leading name segment for every metric, without the underscore
      */
@@ -148,32 +138,49 @@ final class ServerMetrics
      * Render a `getStats()` array as Prometheus text. Public so a caller can render a
      * snapshot it holds — a stats array pulled over a queue, or a fixture in a test.
      *
-     * @param array{workers:array<int,array<string,int>>,totals:array<string,int>} $stats
+     * Summed and per-worker readings go into separate metric families: one name carrying
+     * both an unlabelled total and a series per worker would double every `sum()` over it.
+     *
+     * @param array{workers?:array<int,array<string,int>>,totals?:array<string,int>} $stats
+     * @throws \InvalidArgumentException when the prefix is not a Prometheus name segment
      */
     public static function render(array $stats, string $prefix = 'spawn'): string
     {
-        /* Prometheus wants `_total` as a suffix; the extension spells this one counter
-         * the other way round. */
-        $rename = ['total_requests' => 'requests_total'];
+        if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $prefix) !== 1) {
+            throw new \InvalidArgumentException("Metric prefix '{$prefix}' is not a valid Prometheus name.");
+        }
+
+        /* Prometheus names a counter with the _total suffix; the extension names this one
+         * total_requests. */
+        $rename  = ['total_requests' => 'requests_total'];
+        $totals  = $stats['totals'] ?? [];
+        $workers = $stats['workers'] ?? [];
 
         $lines = [];
 
-        foreach ($stats['totals'] as $counter => $value) {
-            $metric = $prefix . '_' . ($rename[$counter] ?? $counter);
+        foreach ($totals as $counter => $value) {
+            $name = $rename[$counter] ?? $counter;
+            $type = str_ends_with($name, '_total') ? 'counter' : 'gauge';
 
-            $lines[] = '# TYPE ' . $metric . ' '
-                . (str_ends_with($metric, '_total') ? 'counter' : 'gauge');
-            $lines[] = $metric . ' ' . $value;
+            $lines[] = '# TYPE ' . $prefix . '_' . $name . ' ' . $type;
+            $lines[] = $prefix . '_' . $name . ' ' . $value;
 
-            foreach ($stats['workers'] as $id => $counters) {
+            $series = [];
+
+            foreach ($workers as $id => $counters) {
                 if (array_key_exists($counter, $counters)) {
-                    $lines[] = $metric . '{worker="' . $id . '"} ' . $counters[$counter];
+                    $series[] = $prefix . '_worker_' . $name . '{worker="' . (int) $id . '"} ' . $counters[$counter];
                 }
+            }
+
+            if ($series !== []) {
+                $lines[] = '# TYPE ' . $prefix . '_worker_' . $name . ' ' . $type;
+                $lines   = array_merge($lines, $series);
             }
         }
 
         $lines[] = '# TYPE ' . $prefix . '_workers gauge';
-        $lines[] = $prefix . '_workers ' . count($stats['workers']);
+        $lines[] = $prefix . '_workers ' . count($workers);
 
         return implode("\n", $lines) . "\n";
     }
@@ -186,9 +193,8 @@ final class ServerMetrics
         try {
             return $this->server()->getStats();
         } catch (\TrueAsync\HttpServerRuntimeException $e) {
-            /* The one way the extension refuses: counters were never collected. Said in
-             * the application's own terms, because `async.server.stats` is what decides
-             * it here. */
+            /* getStats() throws for one reason: statistics were not enabled. Restated
+             * against the config key that sets it here. */
             throw new \RuntimeException(
                 'Server statistics are off — set async.server.stats to true.',
                 0,
