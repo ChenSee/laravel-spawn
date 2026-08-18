@@ -74,9 +74,11 @@ class TrueAsyncServer implements ServerInterface
                 $kernel = $app->make(Kernel::class);
                 try {
                     $laravelResponse = $kernel->handle($request);
-                    $this->sendResponse($taResponse, $laravelResponse, $taRequest->getMethod() === 'HEAD');
-
-                    $kernel->terminate($request, $laravelResponse);
+                    try {
+                        $this->sendResponse($taResponse, $laravelResponse, $taRequest->getMethod() === 'HEAD');
+                    } finally {
+                        $kernel->terminate($request, $laravelResponse);
+                    }
                 } catch (\Throwable $e) {
                     fwrite(STDERR, "\n!!! FATAL SERVER ERROR !!!\n");
                     fwrite(STDERR, 'Message: '.$e->getMessage()."\n");
@@ -84,7 +86,9 @@ class TrueAsyncServer implements ServerInterface
                     fwrite(STDERR, "Trace:\n".$e->getTraceAsString()."\n");
 
 
-                    if (!$taResponse->isClosed())
+                    /* Once the headers are on the wire the status is spent: setStatusCode()
+                     * throws on such a response, and the throw would escape this handler. */
+                    if (!$taResponse->isClosed() && !$taResponse->isHeadersSent())
                     {
                         $taResponse->setStatusCode(500);
                         $taResponse->setHeader('Content-Type', 'text/plain');
@@ -385,7 +389,9 @@ class TrueAsyncServer implements ServerInterface
     {
         // Already streamed and closed directly (Sse::end(), or any other code
         // that wrote to trueasync_response() itself) — nothing left to send.
-        if ($taResponse->isClosed()) {
+        // Committed headers count too: send() and sendFile() leave the response open
+        // while making setStatusCode() and setHeader() throw.
+        if ($taResponse->isClosed() || $taResponse->isHeadersSent()) {
             return;
         }
 
