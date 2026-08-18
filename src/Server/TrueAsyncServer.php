@@ -21,6 +21,9 @@ use function Async\spawn;
 
 class TrueAsyncServer implements ServerInterface
 {
+    /** How much a streamed body accumulates before it goes out as one chunk. */
+    private const STREAM_CHUNK_BYTES = 65536;
+
     public function __construct(private $autoloadPath, private $bootstrapPath, private readonly array $options = [])
     {
     }
@@ -411,7 +414,88 @@ class TrueAsyncServer implements ServerInterface
             $taResponse->addHeader('Set-Cookie', (string) $cookie);
         }
 
-        $taResponse->setBody($response->getContent() ?? '');
+        $content = $response->getContent();
+
+        /* False, not null, is what a response producing its own body answers here:
+         * StreamedResponse and its subclasses, BinaryFileResponse, StreamedJsonResponse. */
+        if ($content === false) {
+            $this->streamContent($taResponse, $response);
+
+            return;
+        }
+
+        $taResponse->setBody($content);
+        $taResponse->end();
+    }
+
+    /**
+     * Forward a response that writes its own body to standard output.
+     *
+     * An output buffer catches what {@see SymfonyResponse::sendContent()} echoes and hands each
+     * full chunk to send(), so the response is framed as chunked and a slow peer's backpressure
+     * reaches this coroutine. What the body is stays Symfony's: byte ranges, the deferred
+     * deletion of a downloaded file, the generator behind a streamed JSON.
+     *
+     * Rethrows what sendContent() threw while the buffer still holds every byte, leaving the
+     * caller free to answer 500. Once a chunk is out the status is spent and the failure can
+     * only be logged: a chunked response cannot be disowned mid-flight. A peer that hangs up
+     * counts as an ordinary end and returns quietly.
+     */
+    private function streamContent(HttpResponse $taResponse, SymfonyResponse $response): void
+    {
+        /* Deflate emits nothing until it has enough input, which would collect a slow stream
+         * into one burst at the end. Streaming buys immediacy with the ratio. */
+        $taResponse->setNoCompression();
+
+        $peerGone   = false;
+        $discarding = false;
+
+        /* Nothing may escape this callback: PHP treats a handler that returned no value as
+         * failed, disables it, and writes the pending chunk to the worker's own output.
+         * ob_end_clean() runs the handler as well and drops only what it returns, never what
+         * it has already done, so the discard flag has to stop the send. */
+        $sink = static function (string $chunk) use ($taResponse, &$peerGone, &$discarding): string {
+            if ($chunk === '' || $peerGone || $discarding) {
+                return '';
+            }
+
+            try {
+                $taResponse->send($chunk);
+            } catch (\Throwable) {
+                $peerGone = true;
+            }
+
+            return '';
+        };
+
+        /* Close every level the body callback left open, and none below: the widespread
+         * `while (ob_get_level()) ob_end_flush()` in streaming code pops this handler too. */
+        $outerLevel = ob_get_level();
+
+        if (!ob_start($sink, self::STREAM_CHUNK_BYTES)) {
+            throw new \RuntimeException('Output buffering is unavailable, the response body cannot be forwarded');
+        }
+
+        try {
+            $response->sendContent();
+        } catch (\Throwable $e) {
+            $discarding = true;
+
+            while (ob_get_level() > $outerLevel) {
+                ob_end_clean();
+            }
+
+            throw $e;
+        }
+
+        while (ob_get_level() > $outerLevel) {
+            ob_end_flush();
+        }
+
+        if ($peerGone) {
+            return;
+        }
+
         $taResponse->end();
     }
 
