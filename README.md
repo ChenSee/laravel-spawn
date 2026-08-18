@@ -446,6 +446,29 @@ On pure CPU-bound workloads both servers cap at the same throughput (~10k req/s)
 
 ---
 
+## Metrics
+
+The running server's counters — requests, responses by status class, live connections per
+protocol, HTTP/2 and streaming traffic — are readable from the application under
+`async:serve`:
+
+```php
+use Spawn\Laravel\Server\ServerMetrics;
+
+Route::get('/metrics', fn () => response(
+    app(ServerMetrics::class)->toPrometheus(),
+    200,
+    ['Content-Type' => 'text/plain; version=0.0.4'],
+));
+```
+
+The package publishes no endpoint of its own, so the URL and who may read it stay yours.
+`totals()`, `workers()` and `latency()` return the same numbers as arrays. Counters are
+collected while `async.server.stats` is on, which it is by default. See
+[docs/METRICS.md](docs/METRICS.md).
+
+---
+
 ## Sessions
 
 ### Database sessions (built-in fix)

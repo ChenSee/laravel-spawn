@@ -51,7 +51,9 @@ class TrueAsyncServer implements ServerInterface
             $telescopeEnabled = class_exists(\Laravel\Telescope\Telescope::class)
                 && method_exists(\Laravel\Telescope\Telescope::class, 'isRecording');
 
-            $server->addHttpHandler(function (HttpRequest $taRequest, HttpResponse $taResponse) use ($telescopeEnabled
+            $server->addHttpHandler(function (HttpRequest $taRequest, HttpResponse $taResponse) use (
+                $telescopeEnabled,
+                $server
             ): void {
                 $taRequest->awaitBody();
 
@@ -65,6 +67,11 @@ class TrueAsyncServer implements ServerInterface
                 }
 
                 $app    = app();
+
+                /* The container of each pool worker gets its own server object: the
+                 * handler is copied into every worker thread, and a controller asking
+                 * for ServerMetrics has no other way back to the server. */
+                $app->make(ServerMetrics::class)->useServer($server);
 
                 \Spawn\Laravel\Debugbar\ResetDebugbar::handle($app, $request);
 
@@ -172,6 +179,13 @@ class TrueAsyncServer implements ServerInterface
         $config->setReadTimeout((int) ($this->options['read_timeout'] ?? 60));
         $config->setWriteTimeout((int) ($this->options['write_timeout'] ?? 60));
         $config->setCompressionEnabled((bool) ($this->options['compression'] ?? true));
+        /* Off, the extension allocates no counter slab and getStats() throws; the
+         * per-request increments are always on either way. */
+        $config->setStatsEnabled((bool) ($this->options['stats'] ?? true));
+        /* Two things at once in the extension: incoming traceparent / tracestate are
+         * parsed, and every request gets the timing stamps ServerMetrics::latency()
+         * reports. Without it those timings stay zero. */
+        $config->setTelemetryEnabled((bool) ($this->options['telemetry'] ?? false));
         $config->setWorkers((int) ($this->options['workers']));
         $config->setLogSeverity(\TrueAsync\LogSeverity::INFO)
             ->setLogStream(STDERR);

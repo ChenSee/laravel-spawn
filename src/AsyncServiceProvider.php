@@ -8,6 +8,7 @@ use Spawn\Laravel\Console\AuditCapturesCommand;
 use Spawn\Laravel\Console\FrankenServeCommand;
 use Spawn\Laravel\Console\DevServeCommand;
 use Spawn\Laravel\Console\TrueAsyncServeCommand;
+use Spawn\Laravel\Server\ServerMetrics;
 
 class AsyncServiceProvider extends ServiceProvider
 {
@@ -29,6 +30,9 @@ class AsyncServiceProvider extends ServiceProvider
         $this->registerViteAdapter();
         $this->registerLogContextAdapter();
         $this->registerTelescopeAdapter();
+
+        // One object per worker; the server it reports for is thread-local to that worker.
+        $this->app->singleton(ServerMetrics::class);
 
         $this->mergeConfigFrom(__DIR__ . '/../config/async.php', 'async');
 

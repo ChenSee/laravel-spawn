@@ -1,6 +1,7 @@
 <?php
 
 use Spawn\Laravel\Async\RawIo;
+use Spawn\Laravel\Server\ServerMetrics;
 use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;
 
@@ -25,5 +26,16 @@ if (! function_exists('trueasync_response')) {
     function trueasync_response(): HttpResponse
     {
         return RawIo::response();
+    }
+}
+
+if (! function_exists('trueasync_metrics')) {
+    /**
+     * The running server's counters: request totals, live connections, per-worker
+     * numbers and a Prometheus rendering. Same object as app(ServerMetrics::class).
+     */
+    function trueasync_metrics(): ServerMetrics
+    {
+        return app(ServerMetrics::class);
     }
 }

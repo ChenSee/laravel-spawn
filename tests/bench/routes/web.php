@@ -116,3 +116,43 @@ $router->get('/stream', function () {
 
     return response()->noContent();
 });
+
+// Metrics probe (ServerMetricsE2ETest, TrueAsyncServer only): the package publishes no
+// endpoint, so the application declares one. Both shapes of the same counters, so the
+// test can read a number without parsing the exposition format.
+$router->get('/metrics', function () {
+    return response(
+        app(\Spawn\Laravel\Server\ServerMetrics::class)->toPrometheus(),
+        200,
+        ['Content-Type' => 'text/plain; version=0.0.4'],
+    );
+});
+
+$router->get('/metrics.json', function () {
+    $metrics = trueasync_metrics();
+
+    return response()->json([
+        'available' => $metrics->isAvailable(),
+        'totals'    => $metrics->totals(),
+        'workers'   => $metrics->workers(),
+        'latency'   => $metrics->latency(),
+    ]);
+});
+
+// Same probe for a server started with statistics off: nothing to report, and asking
+// for a number throws rather than answering zero.
+$router->get('/metrics-availability', function () {
+    $metrics = trueasync_metrics();
+    $thrown  = null;
+
+    try {
+        $metrics->totals();
+    } catch (\Throwable $e) {
+        $thrown = $e::class;
+    }
+
+    return response()->json([
+        'available' => $metrics->isAvailable(),
+        'thrown'    => $thrown,
+    ]);
+});
