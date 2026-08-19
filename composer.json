@@ -23,7 +23,6 @@
       "Spawn\\Laravel\\": "src/"
     },
     "files": [
-      "src/bootstrap.php",
       "src/helpers.php"
     ]
   },

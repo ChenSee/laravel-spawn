@@ -14,6 +14,14 @@ parameters:
             message: '#^Method .+::(transaction|coroutineTransaction)\(\) should return TReturn but return statement is missing\.$#'
             identifier: return.missing
             path: src/Database/CoroutineTransactions.php
+        # The relation subclasses declare $constraints to shadow the property of the same name
+        # on Relation, which is the one every coroutine of a worker thread shares. Eloquent's
+        # addConstraints() reads it through late static binding, so the inherited body consults
+        # the subclass copy. Nothing writes that copy — see the note on the trait — so it leaks
+        # nothing; PHP simply has no way to declare a readonly static.
+        -
+            identifier: coroutine.mutableStaticProperty
+            path: src/Database/Eloquent/Relations/ConstrainsPerCoroutine.php
 
 rules:
     - Spawn\Laravel\PHPStan\MutableStaticPropertyRule

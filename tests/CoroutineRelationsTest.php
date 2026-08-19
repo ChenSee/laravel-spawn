@@ -1,0 +1,245 @@
+<?php
+
+namespace Spawn\Laravel\Tests;
+
+use Illuminate\Database\Capsule\Manager as Capsule;
+use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Database\Schema\Blueprint;
+use ReflectionProperty;
+use Spawn\Laravel\Tests\Fixtures\PlainRelationOwner;
+use Spawn\Laravel\Tests\Fixtures\RelationItem;
+use Spawn\Laravel\Tests\Fixtures\RelationOwner;
+use stdClass;
+
+use function Async\suspend;
+
+/**
+ * Eloquent switches Relation::$constraints off while it builds a relation for an eager load,
+ * and back on afterwards. The property is thread state shared by every coroutine of a worker,
+ * and the callback it wraps yields as soon as a model boots against config or cache — so a
+ * sibling coroutine builds its relations inside somebody else's window and loses its
+ * `where foreign_key = ?`, and overlapping windows restore each other's captured value and
+ * leave the flag off for the life of the worker.
+ *
+ * RelationOwner carries the CoroutineRelations trait and PlainRelationOwner does not, so each
+ * case here is checked against both: the trait is worth exactly the difference between them.
+ *
+ * The interleaves are driven by handshakes rather than by sleeping for long enough — a
+ * timing-based test that misses its interleave passes, and passes for the wrong reason.
+ */
+class CoroutineRelationsTest extends AsyncTestCase
+{
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        (new ReflectionProperty(Relation::class, 'constraints'))->setValue(null, true);
+
+        $capsule = new Capsule();
+        $capsule->addConnection(['driver' => 'sqlite', 'database' => ':memory:']);
+        $capsule->setAsGlobal();
+        $capsule->bootEloquent();
+
+        Capsule::schema()->create('relation_owners', function (Blueprint $table) {
+            $table->increments('id');
+            $table->integer('owner_key');
+        });
+
+        Capsule::schema()->create('relation_items', function (Blueprint $table) {
+            $table->increments('id');
+            $table->integer('owner_id');
+        });
+
+        Capsule::table('relation_owners')->insert([
+            ['id' => 1, 'owner_key' => 1],
+            ['id' => 2, 'owner_key' => 2],
+        ]);
+
+        Capsule::schema()->create('relation_tags', function (Blueprint $table) {
+            $table->increments('id');
+        });
+
+        Capsule::schema()->create('relation_owner_tag', function (Blueprint $table) {
+            $table->integer('owner_id');
+            $table->integer('tag_id');
+        });
+
+        Capsule::schema()->create('relation_notes', function (Blueprint $table) {
+            $table->increments('id');
+            $table->integer('item_id');
+        });
+
+        Capsule::table('relation_items')->insert([
+            ['id' => 1, 'owner_id' => 1],
+            ['id' => 2, 'owner_id' => 2],
+            ['id' => 3, 'owner_id' => 2],
+        ]);
+
+        Capsule::table('relation_tags')->insert([['id' => 1], ['id' => 2], ['id' => 3]]);
+
+        Capsule::table('relation_owner_tag')->insert([
+            ['owner_id' => 1, 'tag_id' => 1],
+            ['owner_id' => 2, 'tag_id' => 2],
+            ['owner_id' => 2, 'tag_id' => 3],
+        ]);
+
+        Capsule::table('relation_notes')->insert([
+            ['id' => 1, 'item_id' => 1],
+            ['id' => 2, 'item_id' => 2],
+            ['id' => 3, 'item_id' => 3],
+        ]);
+    }
+
+    public function test_sibling_coroutine_keeps_its_where_clause(): void
+    {
+        $results = $this->insideAForeignWindow([
+            'with the trait' => fn () => RelationOwner::find(1)->items()->count(),
+            'without it' => fn () => PlainRelationOwner::find(1)->items()->count(),
+        ]);
+
+        $this->assertSame(1, $results['with the trait'], 'a sibling must see its own row, not every owner\'s');
+        $this->assertSame(3, $results['without it'], 'the shared flag is what the trait is for');
+    }
+
+    public function test_one_of_many_keeps_its_where_clause(): void
+    {
+        $results = $this->insideAForeignWindow([
+            'with the trait' => fn () => RelationOwner::find(2)->latestItem()->first()?->id,
+        ]);
+
+        $this->assertSame(3, $results['with the trait'], 'latestOfMany() constrains a subquery of its own');
+    }
+
+    public function test_a_relation_survives_a_yield_inside_add_constraints(): void
+    {
+        $results = $this->insideAForeignWindow([
+            // The accessor of the local key suspends in the middle of addConstraints(), so the
+            // constraint has to survive both the foreign window and the suspension.
+            'with the trait' => fn () => RelationOwner::find(2)->slowItems()->count(),
+        ]);
+
+        $this->assertSame(2, $results['with the trait']);
+    }
+
+    public function test_the_shared_flag_no_longer_decides(): void
+    {
+        (new ReflectionProperty(Relation::class, 'constraints'))->setValue(null, false);
+
+        $this->assertSame(1, RelationOwner::find(1)->items()->count());
+        $this->assertSame(3, PlainRelationOwner::find(1)->items()->count());
+    }
+
+    public function test_eager_loading_still_asks_for_every_owner_at_once(): void
+    {
+        Capsule::connection()->enableQueryLog();
+
+        $owners = RelationOwner::with('items')->get();
+
+        $log = Capsule::connection()->getQueryLog();
+
+        $this->assertCount(2, $log, 'one query for the owners and one for all their items');
+        $this->assertStringContainsString(' in (', $log[1]['query']);
+        $this->assertStringNotContainsString('"owner_id" = ?', $log[1]['query']);
+        $this->assertSame(1, $owners[0]->items->count());
+        $this->assertSame(2, $owners[1]->items->count());
+    }
+
+    public function test_eager_loading_a_pivot_relation_still_joins(): void
+    {
+        $owners = RelationOwner::with('tags')->get();
+
+        $this->assertSame(1, $owners[0]->tags->count());
+        $this->assertSame(2, $owners[1]->tags->count());
+    }
+
+    public function test_eager_loading_through_a_second_table_still_joins(): void
+    {
+        $owners = RelationOwner::with('notes')->get();
+
+        $this->assertSame(1, $owners[0]->notes->count());
+        $this->assertSame(2, $owners[1]->notes->count());
+    }
+
+    public function test_a_pivot_relation_keeps_its_where_clause(): void
+    {
+        $results = $this->insideAForeignWindow([
+            'with the trait' => fn () => RelationOwner::find(1)->tags()->count(),
+        ]);
+
+        $this->assertSame(1, $results['with the trait']);
+    }
+
+    public function test_lazy_eager_loading_still_groups_by_parent(): void
+    {
+        $owners = RelationOwner::all();
+        $owners->load('items', 'tags', 'notes');
+
+        $this->assertSame(1, $owners[0]->items->count());
+        $this->assertSame(2, $owners[1]->items->count());
+        $this->assertSame(2, $owners[1]->tags->count());
+        $this->assertSame(2, $owners[1]->notes->count());
+    }
+
+    public function test_where_has_still_filters(): void
+    {
+        $this->assertSame(1, RelationOwner::has('items', '>=', 2)->count());
+        $this->assertSame(2, RelationOwner::withCount('items')->get()[1]->items_count);
+    }
+
+    public function test_lazy_load_is_constrained_outside_any_window(): void
+    {
+        $this->assertSame(1, RelationOwner::find(1)->items()->count());
+        $this->assertSame(2, RelationItem::query()->where('owner_id', 2)->count());
+    }
+
+    /**
+     * Run each closure in a coroutine of its own while another coroutine holds a
+     * noConstraints() window open, and hand back what each one returned.
+     *
+     * The window opens before any of them runs and closes only after the last has finished,
+     * so a case that reads the flag reads it wrong — which is the point.
+     *
+     * @param  array<string, callable>  $cases
+     * @return array<string, mixed>
+     */
+    private function insideAForeignWindow(array $cases): array
+    {
+        $gate = new stdClass();
+        $gate->open = false;
+        $gate->left = 0;
+
+        $coroutines = ['window' => function () use ($gate, $cases) {
+            Relation::noConstraints(function () use ($gate, $cases) {
+                $gate->open = true;
+                $this->until(fn () => $gate->left === count($cases));
+
+                return null;
+            });
+        }];
+
+        foreach ($cases as $name => $case) {
+            $coroutines[$name] = function () use ($gate, $case) {
+                $this->until(fn () => $gate->open);
+
+                try {
+                    return $case();
+                } finally {
+                    $gate->left++;
+                }
+            };
+        }
+
+        return $this->runParallel($coroutines);
+    }
+
+    /**
+     * Yield until the condition holds. runParallel() caps the whole thing at five seconds, so
+     * a condition that never becomes true fails the test instead of hanging the suite.
+     */
+    private function until(callable $condition): void
+    {
+        while (! $condition()) {
+            suspend();
+        }
+    }
+}

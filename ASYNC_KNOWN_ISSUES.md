@@ -191,22 +191,31 @@ visibly; where none is named, nothing will notice the change but a reader.
    one shared handle to every coroutine. Persistent connections are not supported under
    async serving in the first place: one connection shared across coroutines is the
    defect the pool exists to prevent.
-12. **Eloquent's relation-constraints flag is rewritten, not configured.** `RelationConstraints`
-   redirects Composer's class map to rewritten copies of `Relation` and the five classes whose
-   `addConstraints()` reads the flag, generated at autoload time from whatever source is
-   installed. Both call sites of `addConstraints()` are therefore covered, the constructor and
-   `Concerns\CanBeOneOfMany::ofMany()`. Four conditions leave the application on Laravel's own
-   classes: `SPAWN_RELATION_PATCH=0`; a build whose `opcache.preload` declared any of the six
-   before Composer includes `src/bootstrap.php`; a temporary directory that cannot be written;
-   and a source whose statements the rewrite no longer recognises. Worker start-up writes the
-   reason to stderr and serves anyway, since the alternative is refusing to serve at all.
-   Two things the patch does not do. A coroutine spawned **inside** a window does not inherit
-   it — the window lives in the opener's own context — so a relation built there is constrained
-   where the opener wanted it bare; that is a different wrong answer from the one upstream
-   gives, not a new class of one. And the rewritten classes are what the process runs while
-   every tool — PHPStan, the debugger, `git diff vendor/` — reads Laravel's originals.
-   `tests/RelationConstraintsTest.php` pins the behaviour, and five of its cases fail with the
-   patch switched off.
+12. **Eloquent's relation constraints are fixed only for models carrying the trait.**
+   `CoroutineRelations` overrides the ten relation factory methods of `Concerns\HasRelationships`
+   and `newEloquentBuilder()`, so the relations a model builds decide about their own
+   constraints from the coroutine's window rather than from `Relation::$constraints`. A model
+   without the trait keeps Laravel's behaviour and the defect that comes with it, and the
+   package has no way to reach a model it never sees. A relation of a **related** model —
+   `with('items.tags')` — is built by that model's builder, so the trait has to be on it too;
+   a base model of the application covers its own, and a model shipped by a package does not.
+   What the trait skips inside a window is not the whole of `addConstraints()`. Eloquent joins
+   the pivot table of a many-to-many and the intermediate table of a through relation with the
+   constraints off as well — `BelongsToMany::addConstraints()` and
+   `HasOneOrManyThrough::addConstraints()` put `performJoin()` outside the flag — so those four
+   classes fill in `addConstraintsExemptParts()`. A future release moving more work out from
+   under the flag would go missing the same way, and only a test would notice.
+   Three further gaps. `HasMany::one()`, `MorphMany::one()` and `HasManyThrough::one()` name
+   Laravel's classes directly rather than going through the model, so a relation converted that
+   way still reads the shared flag; its closure only constructs objects, so what can be wrong is
+   the flag at that moment rather than a window of its own. A coroutine spawned **inside** a
+   window does not inherit it — the window lives in the opener's own context — so a relation
+   built there is constrained where the opener wanted it bare. And a model that overrides a
+   factory method itself wins over the trait silently; the builder is the exception, where a
+   `#[UseEloquentBuilder]` that does not extend `CoroutineBuilder` is refused with an exception
+   rather than accepted.
+   `tests/CoroutineRelationsTest.php` pins the behaviour, and checks the same cases against a
+   model without the trait so that the difference between them is what the tests assert.
 ---
 
 ## 3. Container contract gaps in `tryResolveScoped()`

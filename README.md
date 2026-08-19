@@ -465,6 +465,40 @@ SESSION_DRIVER=redis
 REDIS_HOST=127.0.0.1
 ```
 
+## Eloquent relations
+
+Eloquent decides whether a relation adds its own `where foreign_key = ?` through
+`Relation::$constraints`, a static property. Eager loading switches it off while it builds the
+relation object and restores it afterwards from a captured value. A static property is one flag
+per worker thread, shared by every coroutine of that worker, so under concurrent serving that
+window belongs to whoever happens to be inside it: one request's relations come out unfiltered
+because another request was eager loading at that moment, and two overlapping windows leave the
+flag off for the rest of the worker's life. The queries stay valid and answer with the whole
+table.
+
+Put the trait on the models — a base model reaches all of them:
+
+```php
+use Illuminate\Database\Eloquent\Model;
+use Spawn\Laravel\Database\Eloquent\CoroutineRelations;
+
+abstract class BaseModel extends Model
+{
+    use CoroutineRelations;
+}
+```
+
+The trait overrides the model's own relation factory methods and its Eloquent builder, both of
+which Laravel provides for the purpose; nothing of the framework is patched or copied. The
+relations it builds keep the decision in the coroutine that asked for it.
+
+It is opt-in because a model this package never sees cannot be given a trait. A model without it
+keeps Laravel's behaviour, which is correct one request at a time and wrong under concurrency.
+
+`HasMany::one()`, `MorphMany::one()` and `HasManyThrough::one()` are the exception: they build
+Laravel's own class directly rather than through the model, so a relation converted that way
+still reads the shared flag.
+
 ---
 
 ## License
