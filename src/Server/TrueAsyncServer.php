@@ -10,6 +10,7 @@ use Spawn\Laravel\Foundation\RequestContext;
 use Spawn\Laravel\Foundation\ScopedService;
 use Spawn\Laravel\Foundation\WorkerBootstrap;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use TrueAsync\HttpServer;
 use TrueAsync\HttpServerConfig;
 use TrueAsync\HttpRequest;
@@ -21,6 +22,8 @@ use function Async\spawn;
 
 class TrueAsyncServer implements ServerInterface
 {
+    private const STREAM_CHUNK_BYTES = 65536;
+
     public function __construct(private $autoloadPath, private $bootstrapPath, private readonly array $options = [])
     {
     }
@@ -408,7 +411,87 @@ class TrueAsyncServer implements ServerInterface
             $taResponse->addHeader('Set-Cookie', (string) $cookie);
         }
 
-        $taResponse->setBody($response->getContent() ?? '');
+        $content = $response->getContent();
+
+        // StreamedResponse and BinaryFileResponse hold no body to return, and answer false.
+        if ($content === false) {
+            $this->streamContent($taResponse, $response);
+
+            return;
+        }
+
+        $taResponse->setBody($content);
+        $taResponse->end();
+    }
+
+    /**
+     * Forward a response that writes its own body to standard output.
+     *
+     * Chunked framing, with the peer's backpressure reaching this coroutine. What the body is
+     * stays Symfony's: ranges, the deferred deletion of a download, the generator of a stream.
+     *
+     * Rethrows while the buffer still holds everything, so the caller can answer 500. Past the
+     * first chunk a failure is only loggable: chunked cannot be disowned mid-flight. A peer
+     * that hangs up counts as an ordinary end.
+     */
+    private function streamContent(HttpResponse $taResponse, SymfonyResponse $response): void
+    {
+        /* Deflate holds its output back until it has enough of it, and text compresses well
+         * enough that a whole slow stream can fit inside that holdback: measured, 350 KB of
+         * CSV produced over 1.5 s arrived as one 10 KB burst at the end. A file is read as
+         * fast as the disk allows, so only the callback-driven stream pays for immediacy. */
+        if ($response instanceof StreamedResponse) {
+            $taResponse->setNoCompression();
+        }
+
+        $peerGone   = false;
+        $discarding = false;
+
+        /* A handler that returns no value counts as failed: PHP disables it and writes the
+         * pending chunk to the worker's own output. It also runs on a discard, where dropping
+         * the return value is not enough, so both the caller's ob_clean() and this method's
+         * own unwind have to be recognised and answered with silence. */
+        $sink = static function (string $chunk, int $phase) use ($taResponse, &$peerGone, &$discarding): string {
+            if ($chunk === '' || $peerGone || $discarding || ($phase & PHP_OUTPUT_HANDLER_CLEAN) !== 0) {
+                return '';
+            }
+
+            try {
+                $taResponse->send($chunk);
+            } catch (\Throwable) {
+                $peerGone = true;
+            }
+
+            return '';
+        };
+
+        // Streaming code often opens with `while (ob_get_level()) ob_end_flush()`, this handler included.
+        $outerLevel = ob_get_level();
+
+        if (!ob_start($sink, self::STREAM_CHUNK_BYTES)) {
+            throw new \RuntimeException('Output buffering is unavailable, the response body cannot be forwarded');
+        }
+
+        try {
+            $response->sendContent();
+        } catch (\Throwable $e) {
+            $discarding = true;
+
+            while (ob_get_level() > $outerLevel) {
+                ob_end_clean();
+            }
+
+            throw $e;
+        }
+
+        while (ob_get_level() > $outerLevel) {
+            ob_end_flush();
+        }
+
+        if ($peerGone) {
+            return;
+        }
+
         $taResponse->end();
     }
 
