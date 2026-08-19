@@ -4,6 +4,7 @@ namespace Spawn\Laravel\Foundation;
 
 use Illuminate\Contracts\Foundation\Application;
 use Spawn\Laravel\Database\Eloquent\EloquentOverrides;
+use Spawn\Laravel\Database\PoolAttributes;
 
 /**
  * Everything a worker does between a booted application and its first request.
@@ -143,13 +144,7 @@ final class WorkerBootstrap
                 "database.connections.{$name}.options",
                 array_replace(
                     $config->get("database.connections.{$name}.options", []),
-                    [
-                        \PDO::ATTR_POOL_ENABLED              => true,
-                        \PDO::ATTR_POOL_MIN                  => $pool['min'] ?? 2,
-                        \PDO::ATTR_POOL_MAX                  => $pool['max'] ?? 10,
-                        // The attribute is in milliseconds, the config in seconds.
-                        \PDO::ATTR_POOL_HEALTHCHECK_INTERVAL => (int) (($pool['healthcheck_interval'] ?? 30) * 1000),
-                    ]
+                    PoolAttributes::forPool($pool)
                 )
             );
         }
