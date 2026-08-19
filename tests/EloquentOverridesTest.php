@@ -6,7 +6,7 @@ use Illuminate\Database\Capsule\Manager as Capsule;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Schema\Blueprint;
 use ReflectionProperty;
-use Spawn\Laravel\Tests\Fixtures\PlainRelationOwner;
+use Spawn\Laravel\Database\Eloquent\EloquentOverrides;
 use Spawn\Laravel\Tests\Fixtures\RelationItem;
 use Spawn\Laravel\Tests\Fixtures\RelationOwner;
 use stdClass;
@@ -21,13 +21,14 @@ use function Async\suspend;
  * `where foreign_key = ?`, and overlapping windows restore each other's captured value and
  * leave the flag off for the life of the worker.
  *
- * RelationOwner carries the CoroutineRelations trait and PlainRelationOwner does not, so each
- * case here is checked against both: the trait is worth exactly the difference between them.
+ * The fixtures are ordinary models with nothing opted into: the package replaces two Eloquent
+ * classes, so every model of an application is covered, and a test model has to be as plain as
+ * the ones an application writes for the cases here to mean anything.
  *
  * The interleaves are driven by handshakes rather than by sleeping for long enough — a
  * timing-based test that misses its interleave passes, and passes for the wrong reason.
  */
-class CoroutineRelationsTest extends AsyncTestCase
+class EloquentOverridesTest extends AsyncTestCase
 {
     protected function setUp(): void
     {
@@ -90,24 +91,41 @@ class CoroutineRelationsTest extends AsyncTestCase
         ]);
     }
 
+    public function test_the_copies_are_in_front_of_laravels_classes(): void
+    {
+        $this->assertSame('installed', EloquentOverrides::status());
+    }
+
+    /**
+     * The copies are frozen against the release they were taken from. When a Laravel update
+     * moves either file, this is where it is noticed — bring the copy forward by hand, take
+     * the new checksum, and check the two edits are still in it.
+     */
+    public function test_the_copies_still_match_the_laravel_files_behind_them(): void
+    {
+        foreach (EloquentOverrides::frozenAgainst() as $class => [$file, $checksum]) {
+            $this->assertNotNull($file, "Laravel's own file for $class was not found");
+            $this->assertSame($checksum, hash_file('sha256', $file),
+                "Laravel's $class has moved on; the copy under overrides/ has to be brought forward");
+        }
+    }
+
     public function test_sibling_coroutine_keeps_its_where_clause(): void
     {
         $results = $this->insideAForeignWindow([
-            'with the trait' => fn () => RelationOwner::find(1)->items()->count(),
-            'without it' => fn () => PlainRelationOwner::find(1)->items()->count(),
+            'owner-1' => fn () => RelationOwner::find(1)->items()->count(),
         ]);
 
-        $this->assertSame(1, $results['with the trait'], 'a sibling must see its own row, not every owner\'s');
-        $this->assertSame(3, $results['without it'], 'the shared flag is what the trait is for');
+        $this->assertSame(1, $results['owner-1'], 'a sibling must see its own row, not every owner\'s');
     }
 
     public function test_one_of_many_keeps_its_where_clause(): void
     {
         $results = $this->insideAForeignWindow([
-            'with the trait' => fn () => RelationOwner::find(2)->latestItem()->first()?->id,
+            'owner' => fn () => RelationOwner::find(2)->latestItem()->first()?->id,
         ]);
 
-        $this->assertSame(3, $results['with the trait'], 'latestOfMany() constrains a subquery of its own');
+        $this->assertSame(3, $results['owner'], 'latestOfMany() constrains a subquery of its own');
     }
 
     public function test_a_relation_survives_a_yield_inside_add_constraints(): void
@@ -115,10 +133,10 @@ class CoroutineRelationsTest extends AsyncTestCase
         $results = $this->insideAForeignWindow([
             // The accessor of the local key suspends in the middle of addConstraints(), so the
             // constraint has to survive both the foreign window and the suspension.
-            'with the trait' => fn () => RelationOwner::find(2)->slowItems()->count(),
+            'owner' => fn () => RelationOwner::find(2)->slowItems()->count(),
         ]);
 
-        $this->assertSame(2, $results['with the trait']);
+        $this->assertSame(2, $results['owner']);
     }
 
     public function test_the_shared_flag_no_longer_decides(): void
@@ -126,7 +144,13 @@ class CoroutineRelationsTest extends AsyncTestCase
         (new ReflectionProperty(Relation::class, 'constraints'))->setValue(null, false);
 
         $this->assertSame(1, RelationOwner::find(1)->items()->count());
-        $this->assertSame(3, PlainRelationOwner::find(1)->items()->count());
+    }
+
+    public function test_one_of_a_has_many_is_still_built_without_constraints(): void
+    {
+        $one = RelationOwner::find(2)->items()->one();
+
+        $this->assertSame(2, $one->first()?->id, 'one() narrows the relation of this owner, not of the table');
     }
 
     public function test_eager_loading_still_asks_for_every_owner_at_once(): void
@@ -163,10 +187,10 @@ class CoroutineRelationsTest extends AsyncTestCase
     public function test_a_pivot_relation_keeps_its_where_clause(): void
     {
         $results = $this->insideAForeignWindow([
-            'with the trait' => fn () => RelationOwner::find(1)->tags()->count(),
+            'owner' => fn () => RelationOwner::find(1)->tags()->count(),
         ]);
 
-        $this->assertSame(1, $results['with the trait']);
+        $this->assertSame(1, $results['owner']);
     }
 
     public function test_lazy_eager_loading_still_groups_by_parent(): void

@@ -191,31 +191,25 @@ visibly; where none is named, nothing will notice the change but a reader.
    one shared handle to every coroutine. Persistent connections are not supported under
    async serving in the first place: one connection shared across coroutines is the
    defect the pool exists to prevent.
-12. **Eloquent's relation constraints are fixed only for models carrying the trait.**
-   `CoroutineRelations` overrides the ten relation factory methods of `Concerns\HasRelationships`
-   and `newEloquentBuilder()`, so the relations a model builds decide about their own
-   constraints from the coroutine's window rather than from `Relation::$constraints`. A model
-   without the trait keeps Laravel's behaviour and the defect that comes with it, and the
-   package has no way to reach a model it never sees. A relation of a **related** model —
-   `with('items.tags')` — is built by that model's builder, so the trait has to be on it too;
-   a base model of the application covers its own, and a model shipped by a package does not.
-   What the trait skips inside a window is not the whole of `addConstraints()`. Eloquent joins
-   the pivot table of a many-to-many and the intermediate table of a through relation with the
-   constraints off as well — `BelongsToMany::addConstraints()` and
-   `HasOneOrManyThrough::addConstraints()` put `performJoin()` outside the flag — so those four
-   classes fill in `addConstraintsExemptParts()`. A future release moving more work out from
-   under the flag would go missing the same way, and only a test would notice.
-   Three further gaps. `HasMany::one()`, `MorphMany::one()` and `HasManyThrough::one()` name
-   Laravel's classes directly rather than going through the model, so a relation converted that
-   way still reads the shared flag; its closure only constructs objects, so what can be wrong is
-   the flag at that moment rather than a window of its own. A coroutine spawned **inside** a
-   window does not inherit it — the window lives in the opener's own context — so a relation
-   built there is constrained where the opener wanted it bare. And a model that overrides a
-   factory method itself wins over the trait silently; the builder is the exception, where a
-   `#[UseEloquentBuilder]` that does not extend `CoroutineBuilder` is refused with an exception
-   rather than accepted.
-   `tests/CoroutineRelationsTest.php` pins the behaviour, and checks the same cases against a
-   model without the trait so that the difference between them is what the tests assert.
+12. **Two Eloquent files are copies, and copies fall behind.** `overrides/laravel-13/` holds
+   `Relations\Relation` and `Concerns\HasRelationships` with one edit each, and
+   `EloquentOverrides` puts them in front of Laravel's through Composer's class map. Neither
+   works without the other: a `Relation` that no longer switches the flag off, next to Laravel's
+   own relation classes, would have eager loading add a `where` on a key that is not there yet.
+   Each copy carries the checksum of the file it was taken from. A Laravel release that touches
+   either one leaves the application on Laravel's classes — with the defect — rather than on a
+   copy that has quietly fallen behind; the worker writes the reason to stderr at start-up and
+   `test_the_copies_still_match_the_laravel_files_behind_them` fails, which is where the copies
+   are meant to be brought forward by hand. Only Laravel 13 is copied: on 12 the checksums do
+   not match and nothing is installed.
+   Three things the copies do not reach. A coroutine spawned **inside** a window does not inherit
+   it — the window lives in the opener's own context — so a relation built there is constrained
+   where the opener wanted it bare. A package shipping its own `Relation` subclass with its own
+   `addConstraints()` reads the shared property, which is now permanently true, and adds
+   constraints during an eager load. And `opcache.preload` declaring either class before Composer
+   includes `src/bootstrap.php` leaves the application on Laravel's own.
+   `tests/EloquentOverridesTest.php` pins the behaviour; six of its cases fail with
+   `SPAWN_ELOQUENT_OVERRIDES=0`.
 ---
 
 ## 3. Container contract gaps in `tryResolveScoped()`

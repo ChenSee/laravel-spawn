@@ -476,28 +476,16 @@ because another request was eager loading at that moment, and two overlapping wi
 flag off for the rest of the worker's life. The queries stay valid and answer with the whole
 table.
 
-Put the trait on the models — a base model reaches all of them:
+Nothing to do — the package puts its own copies of two Eloquent files in front of Laravel's,
+`Relations\Relation` and `Concerns\HasRelationships`. The first keeps that window in the
+coroutine that opened it; the second builds relation classes that read it. Every model is
+covered, including the ones that come from other packages.
 
-```php
-use Illuminate\Database\Eloquent\Model;
-use Spawn\Laravel\Database\Eloquent\CoroutineRelations;
-
-abstract class BaseModel extends Model
-{
-    use CoroutineRelations;
-}
-```
-
-The trait overrides the model's own relation factory methods and its Eloquent builder, both of
-which Laravel provides for the purpose; nothing of the framework is patched or copied. The
-relations it builds keep the decision in the coroutine that asked for it.
-
-It is opt-in because a model this package never sees cannot be given a trait. A model without it
-keeps Laravel's behaviour, which is correct one request at a time and wrong under concurrency.
-
-`HasMany::one()`, `MorphMany::one()` and `HasManyThrough::one()` are the exception: they build
-Laravel's own class directly rather than through the model, so a relation converted that way
-still reads the shared flag.
+The copies live in `overrides/` and are frozen against the Laravel release they were taken from,
+so each carries the checksum of the file behind it. A release that touches either file leaves
+the application on Laravel's own classes rather than on a copy that has fallen behind; the
+worker writes the reason to stderr at start-up, and `EloquentOverrides::status()` answers it at
+any time. `SPAWN_ELOQUENT_OVERRIDES=0` switches the copies off.
 
 ---
 

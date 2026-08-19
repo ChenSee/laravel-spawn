@@ -5,20 +5,20 @@ namespace Spawn\Laravel\Database\Eloquent\Relations;
 use Spawn\Laravel\Database\Eloquent\RelationWindow;
 
 /**
- * Makes one relation class read its own coroutine instead of the shared flag.
+ * Makes one relation class decide about its own constraints from the coroutine that builds it.
  *
- * Two things do that, and both are needed. The property shadows `Relation::$constraints`:
- * Eloquent's `addConstraints()` reads it through late static binding, so the inherited body
- * consults this copy instead of the shared one. The method then answers from the window of
- * the coroutine that is building the relation.
- *
- * Nothing ever writes this copy. Every `noConstraints()` call in the framework names
- * `Relation`, `HasOne`, `MorphOne` or `HasOneThrough`, and none of those is one of these
- * subclasses, so the property is a constant `true` that PHP will not let us declare as one:
- * static properties cannot be readonly, and the inherited body reads a property.
+ * The window replaces `Relation::$constraints`, which the substituted `Relation` no longer
+ * writes: it stays true, so the inherited `addConstraints()` bodies reached through
+ * `parent::` behave as they do for a request that asked for nothing special.
  */
 trait ConstrainsPerCoroutine
 {
+    /**
+     * Shadows Relation::$constraints. The substituted Relation no longer writes that property,
+     * but anything else that still does — a package, a test — would otherwise decide for these
+     * classes; addConstraints() reads it through late static binding, so the inherited bodies
+     * reached through parent:: consult this copy, which nothing writes at all.
+     */
     protected static $constraints = true;
 
     public function addConstraints()

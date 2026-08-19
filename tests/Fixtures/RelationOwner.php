@@ -8,18 +8,15 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\HasOne;
-use Spawn\Laravel\Database\Eloquent\CoroutineRelations;
 
 use function Async\delay;
 
 /**
- * The parent side of the relation the constraints flag decides about, with the trait an
- * application puts on its base model.
+ * The parent side of the relation the constraints flag decides about. An ordinary model:
+ * the package reaches it through Eloquent itself, so there is nothing for it to opt into.
  */
 class RelationOwner extends Model
 {
-    use CoroutineRelations;
-
     public $timestamps = false;
 
     protected $table = 'relation_owners';
