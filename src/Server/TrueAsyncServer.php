@@ -12,6 +12,7 @@ use Spawn\Laravel\Foundation\WorkerBootstrap;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use TrueAsync\HttpServer;
+use TrueAsync\HttpServerRuntimeException;
 use TrueAsync\HttpServerConfig;
 use TrueAsync\HttpRequest;
 use TrueAsync\HttpResponse;
@@ -74,9 +75,18 @@ class TrueAsyncServer implements ServerInterface
                 $kernel = $app->make(Kernel::class);
                 try {
                     $laravelResponse = $kernel->handle($request);
-                    $this->sendResponse($taResponse, $laravelResponse, $taRequest->getMethod() === 'HEAD');
-
-                    $kernel->terminate($request, $laravelResponse);
+                    try {
+                        $this->sendResponse($taResponse, $laravelResponse, $taRequest->getMethod() === 'HEAD');
+                    } finally {
+                        /* An aborted response still owes the session its write and the
+                         * terminable middleware its run, and a failure of either must not
+                         * take the place of the one that got us here. */
+                        try {
+                            $kernel->terminate($request, $laravelResponse);
+                        } catch (\Throwable $terminateFailure) {
+                            fwrite(STDERR, '[async] terminate: '.$terminateFailure->getMessage()."\n");
+                        }
+                    }
                 } catch (\Throwable $e) {
                     fwrite(STDERR, "\n!!! FATAL SERVER ERROR !!!\n");
                     fwrite(STDERR, 'Message: '.$e->getMessage()."\n");
@@ -84,7 +94,8 @@ class TrueAsyncServer implements ServerInterface
                     fwrite(STDERR, "Trace:\n".$e->getTraceAsString()."\n");
 
 
-                    if (!$taResponse->isClosed())
+                    // A status line already on the wire has no replacement, and asking for one throws.
+                    if (!$taResponse->isClosed() && !$taResponse->isHeadersSent())
                     {
                         $taResponse->setStatusCode(500);
                         $taResponse->setHeader('Content-Type', 'text/plain');
@@ -382,11 +393,18 @@ class TrueAsyncServer implements ServerInterface
     {
         // Already streamed and closed directly (Sse::end(), or any other code
         // that wrote to trueasync_response() itself) — nothing left to send.
-        if ($taResponse->isClosed()) {
+        /* send() leaves the response open with its setters sealed, so closed alone is not the
+         * whole test. sendFile() seals it while raising neither flag and there is nothing to
+         * ask, which is why the first setter doubles as the probe. */
+        if ($taResponse->isClosed() || $taResponse->isHeadersSent()) {
             return;
         }
 
-        $taResponse->setStatusCode($response->getStatusCode());
+        try {
+            $taResponse->setStatusCode($response->getStatusCode());
+        } catch (HttpServerRuntimeException) {
+            return;
+        }
 
         foreach ($response->headers->allPreserveCaseWithoutCookies() as $name => $values) {
             /* Only the server counts the bytes it writes: compression re-encodes the body,
