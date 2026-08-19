@@ -157,3 +157,53 @@ $router->get('/metrics-availability', function () {
         'latency'   => $metrics->latency(),
     ]);
 });
+
+// ── Response framing probes (ResponseFramingE2ETest, TrueAsyncServer only) ──
+//
+// What leaves the socket is decided by TrueAsyncServer::sendResponse(), and by nothing
+// DevServer shares: it emits through ResponseEmitter, which counts the body itself. Only
+// a genuine TrueAsync\HttpServer can show a Content-Length that disagrees with the bytes,
+// or a body that never left at all.
+
+// A Content-Length the application got wrong. The server emits a handler-set value
+// verbatim, so copying this one through would put 999999 on the wire above five bytes.
+$router->get('/framing/stale-length', fn () => response('SHORT', 200, [
+    'Content-Length' => '999999',
+    'Content-Type'   => 'text/plain',
+]));
+
+// The file of a download is written to standard output by Symfony, and its size is
+// announced in a header Symfony sets: getContent() answers false for it.
+$router->get('/framing/download', function () {
+    $path = sys_get_temp_dir() . '/spawn-framing-probe.bin';
+
+    if (!is_file($path) || filesize($path) !== 300000) {
+        file_put_contents($path, str_repeat('A', 300000));
+    }
+
+    return response()->download($path, 'probe.bin');
+});
+
+// The same for a stream, except the bytes come from a callback that echoes in bursts
+// larger than the forwarding buffer.
+$router->get('/framing/stream', fn () => response()->stream(function () {
+    for ($i = 0; $i < 3; $i++) {
+        echo str_repeat('B', 100000);
+    }
+}, 200, ['Content-Type' => 'text/plain']));
+
+// A body callback that fails before anything has been forwarded. Nothing is committed
+// yet, so the request can still be answered as the failure it is.
+$router->get('/framing/stream-throws', fn () => response()->stream(function () {
+    echo 'partial';
+
+    throw new \RuntimeException('body callback failed');
+}, 200, ['Content-Type' => 'text/plain']));
+
+// PHP runs an output handler on a discard as well, handing it the bytes it was asked
+// to drop. They must not reach the client.
+$router->get('/framing/discard', fn () => response()->stream(function () {
+    echo 'DISCARDED';
+    ob_clean();
+    echo 'KEPT';
+}, 200, ['Content-Type' => 'text/plain']));
