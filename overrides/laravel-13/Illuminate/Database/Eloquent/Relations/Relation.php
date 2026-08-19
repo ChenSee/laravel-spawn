@@ -64,6 +64,13 @@ abstract class Relation implements BuilderContract
     protected static $constraints = true;
 
     /**
+     * Indicates whether constraints should be enabled for nested relation attributes.
+     *
+     * @var bool
+     */
+    protected static $constraintsForNestedRelations = false;
+
+    /**
      * An array to map morph names to their class names in the database.
      *
      * @var array<string, class-string<\Illuminate\Database\Eloquent\Model>>
@@ -109,13 +116,68 @@ abstract class Relation implements BuilderContract
      */
     public static function noConstraints(Closure $callback)
     {
-        // Upstream saves this into $constraints, a static property, and restores it from the
-        // saved value. Two coroutines of one worker thread cannot both do that: the second to
-        // enter saves the first's disabled state and hands it back on the way out, and the
-        // flag never returns. The window belongs in the coroutine that opened it instead, and
-        // $constraints below is left alone — permanently true, which is what the relation
-        // classes of this package expect to find behind their own decision.
-        return RelationWindow::open($callback);
+        return static::withoutConstraints($callback, false);
+    }
+
+    /**
+     * Run a callback without constraints while preserving them for nested relation attributes.
+     *
+     * @template TReturn of mixed
+     *
+     * @param  Closure(): TReturn  $callback
+     * @return TReturn
+     */
+    public static function noConstraintsForRelation(Closure $callback)
+    {
+        return static::withoutConstraints($callback, true);
+    }
+
+    /**
+     * Run a callback with the configured relation constraints.
+     *
+     * @template TReturn of mixed
+     *
+     * @param  Closure(): TReturn  $callback
+     * @param  bool  $constraintsForNestedRelations
+     * @return TReturn
+     */
+    protected static function withoutConstraints(Closure $callback, $constraintsForNestedRelations)
+    {
+        // Upstream saves the two properties and restores them from the saved values. Two
+        // coroutines of one worker thread cannot both do that: the second to enter saves the
+        // first's disabled state and hands it back on the way out, and the flags never return.
+        // The decision belongs to the coroutine that made it instead, and the properties below
+        // are left alone — $constraints stays true, which is what the relation classes of this
+        // package expect to find behind their own decision.
+        return RelationWindow::open($callback, (bool) $constraintsForNestedRelations);
+    }
+
+    /**
+     * Run a callback with constraints enabled on the relation.
+     *
+     * @template TReturn of mixed
+     *
+     * @param  Closure(): TReturn  $callback
+     * @return TReturn
+     */
+    public static function withConstraints(Closure $callback)
+    {
+        return RelationWindow::closed($callback);
+    }
+
+    /**
+     * Run a callback with constraints when resolving a nested relation attribute.
+     *
+     * @template TReturn of mixed
+     *
+     * @param  Closure(): TReturn  $callback
+     * @return TReturn
+     */
+    public static function withConstraintsForNestedRelation(Closure $callback)
+    {
+        return RelationWindow::forNestedRelations()
+            ? static::withConstraints($callback)
+            : $callback();
     }
 
     /**
@@ -362,6 +424,16 @@ abstract class Relation implements BuilderContract
     }
 
     /**
+     * Get the class name of the related model.
+     *
+     * @return class-string<TRelatedModel>
+     */
+    public function getRelatedClass()
+    {
+        return $this->related::class;
+    }
+
+    /**
      * Get the name of the "created at" column.
      *
      * @return string
@@ -499,11 +571,15 @@ abstract class Relation implements BuilderContract
     /**
      * Get the model associated with a custom polymorphic type.
      *
-     * @param  string  $alias
+     * @param  string|int|null  $alias
      * @return class-string<\Illuminate\Database\Eloquent\Model>|null
      */
     public static function getMorphedModel($alias)
     {
+        if (is_null($alias)) {
+            return null;
+        }
+
         return static::$morphMap[$alias] ?? null;
     }
 

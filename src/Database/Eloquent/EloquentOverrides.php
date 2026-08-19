@@ -38,12 +38,12 @@ final class EloquentOverrides
         'Illuminate\\Database\\Eloquent\\Relations\\Relation' => [
             'overrides/laravel-13/Illuminate/Database/Eloquent/Relations/Relation.php',
             'Relations/Relation.php',
-            'a3a7c7dc5d8bcfd4861a9b2621c9c1087af16a7341a73b70208a704727d38134',
+            '30e8d8a056ed866be1ee586003094f9c233e2e1a8d42d732c366ba8f01982cc7',
         ],
         'Illuminate\\Database\\Eloquent\\Concerns\\HasRelationships' => [
             'overrides/laravel-13/Illuminate/Database/Eloquent/Concerns/HasRelationships.php',
             'Concerns/HasRelationships.php',
-            'a0e703945cd549a6ae381be655a60bdc2fed60ed5b9bd1739ec0db5f4e7a2534',
+            'a7258ca67a51e13722a27ea62b9d3ed802a56c40d51920ffa23301acaf7b4059',
         ],
     ];
 

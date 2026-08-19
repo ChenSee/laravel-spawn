@@ -7,39 +7,38 @@ use Closure;
 use function Async\coroutine_context;
 
 /**
- * The "build this relation without its own where clause" window, held per coroutine.
+ * Eloquent's "build this relation without its own where clause" decision, held per coroutine.
  *
- * Eloquent holds that decision in `Relation::$constraints`, a static property, which is one
- * flag per worker thread and therefore shared by every coroutine of that worker. This class
- * is the same decision kept where it belongs: the coroutine's own context, which nothing
- * inherits and which dies with the coroutine that owns it.
+ * Upstream keeps it in `Relation::$constraints` and `Relation::$constraintsForNestedRelations`,
+ * two static properties, which are one pair per worker thread and therefore shared by every
+ * coroutine of that worker. Here the same decision is a stack in the coroutine's own context,
+ * which nothing inherits and which dies with the coroutine that owns it.
  *
- * Only Eloquent's eager loading opens a window, and only around building the relation object;
- * see CoroutineBuilder, which is the one caller.
+ * The copies of Eloquent under `overrides/` are the only callers: `withoutConstraints()` pushes
+ * a frame that disables them, `withConstraints()` one that enables them again, and the relation
+ * classes of this package read the top of the stack.
  */
 final class RelationWindow
 {
     private const KEY = 'spawn.relation.window';
 
     /**
-     * Run the callback with the window open, and return whatever it returns.
+     * Run the callback with the relation's own constraints switched off.
      *
-     * Windows nest: an inner one closes without closing the outer. The count is restored even
-     * when the callback throws, and a coroutine cancelled inside the window leaves nothing
-     * behind, because the count lives in the context that goes away with it.
+     * @param  bool  $forNestedRelations  Whether a nested relation attribute resolved inside the
+     *                                    callback should get its constraints back.
      */
-    public static function open(Closure $callback): mixed
+    public static function open(Closure $callback, bool $forNestedRelations = false): mixed
     {
-        $context = coroutine_context();
-        $depth = self::depth();
+        return self::within($callback, [false, $forNestedRelations]);
+    }
 
-        $context->set(self::KEY, $depth + 1, true);
-
-        try {
-            return $callback();
-        } finally {
-            $context->set(self::KEY, $depth, true);
-        }
+    /**
+     * Run the callback with the relation's own constraints switched on.
+     */
+    public static function closed(Closure $callback): mixed
+    {
+        return self::within($callback, [true, self::forNestedRelations()]);
     }
 
     /**
@@ -47,11 +46,46 @@ final class RelationWindow
      */
     public static function isOpen(): bool
     {
-        return self::depth() > 0;
+        $frames = self::frames();
+
+        return $frames !== [] && end($frames)[0] === false;
     }
 
-    private static function depth(): int
+    /**
+     * Whether a nested relation attribute resolved right now gets its constraints back.
+     */
+    public static function forNestedRelations(): bool
     {
-        return (int) (coroutine_context()->findLocal(self::KEY) ?? 0);
+        $frames = self::frames();
+
+        return $frames !== [] && end($frames)[1] === true;
+    }
+
+    /**
+     * Push a frame for the length of the callback. The stack is restored even when the callback
+     * throws, and a coroutine killed inside one leaves nothing behind: the context goes with it.
+     *
+     * @param  array{0: bool, 1: bool}  $frame
+     */
+    private static function within(Closure $callback, array $frame): mixed
+    {
+        $context = coroutine_context();
+        $frames = self::frames();
+
+        $context->set(self::KEY, [...$frames, $frame], true);
+
+        try {
+            return $callback();
+        } finally {
+            $context->set(self::KEY, $frames, true);
+        }
+    }
+
+    /**
+     * @return list<array{0: bool, 1: bool}>
+     */
+    private static function frames(): array
+    {
+        return coroutine_context()->findLocal(self::KEY) ?? [];
     }
 }

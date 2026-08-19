@@ -481,8 +481,9 @@ Nothing to do — the package puts its own copies of two Eloquent files in front
 coroutine that opened it; the second builds relation classes that read it. Every model is
 covered, including the ones that come from other packages.
 
-The copies live in `overrides/` and are frozen against the Laravel release they were taken from,
-so each carries the checksum of the file behind it. A release that touches either file leaves
+The copies live in `overrides/laravel-13/`, beside the one this package already keeps for
+Telescope, and are frozen against the Laravel release they were taken from — 13.26.1 — so each
+carries the checksum of the file behind it. A release that touches either file leaves
 the application on Laravel's own classes rather than on a copy that has fallen behind; the
 worker writes the reason to stderr at start-up, and `EloquentOverrides::status()` answers it at
 any time. `SPAWN_ELOQUENT_OVERRIDES=0` switches the copies off.
