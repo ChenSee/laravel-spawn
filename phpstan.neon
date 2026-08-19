@@ -3,9 +3,19 @@ parameters:
     paths:
         - src
     customRulesetUsed: true
+    scanFiles:
+        # Symbols that exist only where this package runs, and that nothing in vendor/ declares:
+        # the objects the FrankenPHP runtime hands to a worker.
+        - stubs/frankenphp.php
     ignoreErrors:
-        - identifier: new.static
-        - identifier: ignore.unmatchedLine
+        # AsyncServiceProvider swaps overrides/Telescope.php in for the installed Telescope
+        # through an autoloader of its own, and that copy carries CoroutineSafeRecording.
+        # Analysis reads the installed class, where the method is not; a stub cannot help,
+        # because stub files refine the types of members rather than add them.
+        -
+            message: '#^Call to an undefined static method Laravel\\Telescope\\Telescope::enableAsyncRecording\(\)\.$#'
+            identifier: staticMethod.notFound
+            path: src/AsyncServiceProvider.php
         # For $attempts >= 1 transaction() leaves its retry loop only by returning or by
         # rethrowing from one of the handlers, so the tail after the loop is unreachable.
         # PHPStan does not follow that through handleTransactionException() and asks for
@@ -14,6 +24,14 @@ parameters:
             message: '#^Method .+::(transaction|coroutineTransaction)\(\) should return TReturn but return statement is missing\.$#'
             identifier: return.missing
             path: src/Database/CoroutineTransactions.php
+        # The relation subclasses declare $constraints to shadow the property of the same name
+        # on Relation, which is the one every coroutine of a worker thread shares. Eloquent's
+        # addConstraints() reads it through late static binding, so the inherited body consults
+        # the subclass copy. Nothing writes that copy — see the note on the trait — so it leaks
+        # nothing; PHP simply has no way to declare a readonly static.
+        -
+            identifier: coroutine.mutableStaticProperty
+            path: src/Database/Eloquent/Relations/ConstrainsPerCoroutine.php
 
 rules:
     - Spawn\Laravel\PHPStan\MutableStaticPropertyRule

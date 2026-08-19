@@ -191,7 +191,28 @@ visibly; where none is named, nothing will notice the change but a reader.
    one shared handle to every coroutine. Persistent connections are not supported under
    async serving in the first place: one connection shared across coroutines is the
    defect the pool exists to prevent.
-
+12. **Two Eloquent files are copies, and copies fall behind.** `overrides/laravel-13/` holds
+   `Relations\Relation` and `Concerns\HasRelationships` with one edit each, and
+   `EloquentOverrides` puts them in front of Laravel's through Composer's class map. Neither
+   works without the other: a `Relation` that no longer switches the flag off, next to Laravel's
+   own relation classes, would have eager loading add a `where` on a key that is not there yet.
+   Each copy carries the checksum of the file it was taken from. A Laravel release that touches
+   either one leaves the application on Laravel's classes — with the defect — rather than on a
+   copy that has quietly fallen behind; the worker writes the reason to stderr at start-up and
+   `test_the_copies_still_match_the_laravel_files_behind_them` fails, which is where the copies
+   are meant to be brought forward by hand. Only Laravel 13.26.1 is copied: on any other
+   release the checksums do not match and nothing is installed, which the CI of this branch
+   demonstrated — it resolves Laravel afresh, landed on 13.26.1 against copies taken from
+   13.2.0, and went red. `Relation` gained `withConstraints()` and a second flag between those
+   two releases, so the churn is real rather than theoretical.
+   Three things the copies do not reach. A coroutine spawned **inside** a window does not inherit
+   it — the window lives in the opener's own context — so a relation built there is constrained
+   where the opener wanted it bare. A package shipping its own `Relation` subclass with its own
+   `addConstraints()` reads the shared property, which is now permanently true, and adds
+   constraints during an eager load. And `opcache.preload` declaring either class before Composer
+   includes `src/bootstrap.php` leaves the application on Laravel's own.
+   `tests/EloquentOverridesTest.php` pins the behaviour; six of its cases fail with
+   `SPAWN_ELOQUENT_OVERRIDES=0`.
 ---
 
 ## 3. Container contract gaps in `tryResolveScoped()`
