@@ -71,7 +71,7 @@ class TrueAsyncServer implements ServerInterface
                 $kernel = $app->make(Kernel::class);
                 try {
                     $laravelResponse = $kernel->handle($request);
-                    $this->sendResponse($taResponse, $laravelResponse);
+                    $this->sendResponse($taResponse, $laravelResponse, $taRequest->getMethod() === 'HEAD');
 
                     $kernel->terminate($request, $laravelResponse);
                 } catch (\Throwable $e) {
@@ -372,7 +372,10 @@ class TrueAsyncServer implements ServerInterface
         });
     }
 
-    private function sendResponse(HttpResponse $taResponse, SymfonyResponse $response): void
+    /**
+     * @param bool $isHead wire method, not Symfony's: middleware may rewrite the latter
+     */
+    private function sendResponse(HttpResponse $taResponse, SymfonyResponse $response, bool $isHead): void
     {
         // Already streamed and closed directly (Sse::end(), or any other code
         // that wrote to trueasync_response() itself) — nothing left to send.
@@ -383,6 +386,13 @@ class TrueAsyncServer implements ServerInterface
         $taResponse->setStatusCode($response->getStatusCode());
 
         foreach ($response->headers->allPreserveCaseWithoutCookies() as $name => $values) {
+            /* Only the server counts the bytes it writes: compression re-encodes the body,
+             * and a Laravel value outlives later edits to the content. HEAD has none to count,
+             * so there the value is all the client gets (RFC 9110 §9.3.2). */
+            if (!$isHead && strcasecmp($name, 'Content-Length') === 0) {
+                continue;
+            }
+
             $first = true;
             foreach ($values as $value) {
                 if ($first) {
