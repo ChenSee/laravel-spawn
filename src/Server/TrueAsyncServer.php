@@ -55,7 +55,9 @@ class TrueAsyncServer implements ServerInterface
             $telescopeEnabled = class_exists(\Laravel\Telescope\Telescope::class)
                 && method_exists(\Laravel\Telescope\Telescope::class, 'isRecording');
 
-            $server->addHttpHandler(function (HttpRequest $taRequest, HttpResponse $taResponse) use ($telescopeEnabled
+            $server->addHttpHandler(function (HttpRequest $taRequest, HttpResponse $taResponse) use (
+                $telescopeEnabled,
+                $server
             ): void {
                 $taRequest->awaitBody();
 
@@ -69,6 +71,12 @@ class TrueAsyncServer implements ServerInterface
                 }
 
                 $app    = app();
+
+                /* This closure is the only place holding both the worker's server object
+                 * and the worker's container, so a controller reaching for ServerMetrics
+                 * depends on this line. It runs per request rather than once because a
+                 * `use (&$bound)` flag cannot be transferred into a worker thread. */
+                $app->make(ServerMetrics::class)->useServer($server);
 
                 \Spawn\Laravel\Debugbar\ResetDebugbar::handle($app, $request);
 
@@ -186,6 +194,12 @@ class TrueAsyncServer implements ServerInterface
         $config->setReadTimeout((int) ($this->options['read_timeout'] ?? 60));
         $config->setWriteTimeout((int) ($this->options['write_timeout'] ?? 60));
         $config->setCompressionEnabled((bool) ($this->options['compression'] ?? true));
+        /* With it off the extension allocates no counter slab and getStats() throws.
+         * The per-request increments run either way. */
+        $config->setStatsEnabled((bool) ($this->options['stats'] ?? true));
+        /* The extension parses incoming traceparent / tracestate headers and stamps each
+         * request with the timings ServerMetrics::latency() reports. */
+        $config->setTelemetryEnabled((bool) ($this->options['telemetry'] ?? false));
         $config->setWorkers((int) ($this->options['workers']));
         $config->setLogSeverity(\TrueAsync\LogSeverity::INFO)
             ->setLogStream(STDERR);

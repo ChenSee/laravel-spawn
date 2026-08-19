@@ -169,6 +169,38 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Statistics
+        |--------------------------------------------------------------------------
+        |
+        | Read the per-worker counters — requests, responses by status class, live
+        | connections, streaming and HTTP/2 traffic — through
+        | Spawn\Laravel\Server\ServerMetrics. The increments themselves always run;
+        | with this off the server allocates no counter slab and
+        | ServerMetrics::isAvailable() returns false.
+        |
+        | The server publishes nothing on its own: expose the counters from a route of
+        | your own, in whichever format your monitoring reads. See docs/METRICS.md.
+        |
+        */
+
+        'stats' => (bool) env('ASYNC_STATS', true),
+
+        /*
+        |--------------------------------------------------------------------------
+        | Request Telemetry
+        |--------------------------------------------------------------------------
+        |
+        | Parse incoming W3C Trace Context headers and stamp every request, which is
+        | what ServerMetrics::latency() reports: the wait before the handler ran and
+        | the handler's own time. With this off those timings read zero and a request
+        | costs no clock reads.
+        |
+        */
+
+        'telemetry' => (bool) env('ASYNC_TELEMETRY', false),
+
+        /*
+        |--------------------------------------------------------------------------
         | Static File Handlers
         |--------------------------------------------------------------------------
         |
